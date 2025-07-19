@@ -150,7 +150,7 @@ class OMRProcessor:
         col3_x = img_width * 0.67   # Right-center (G9-G13)
         col4_x = img_width * 0.95   # Right edge (A2, G14-G16, A3)
         
-        tolerance = 40  # pixels tolerance for column alignment
+        tolerance = 80  # Increased tolerance for perspective distortion
         
         print(f"  - Image size: {img_width}x{img_height}")
         print(f"  - Expected marker columns at x: {col1_x:.0f}, {col2_x:.0f}, {col3_x:.0f}, {col4_x:.0f}")
@@ -191,10 +191,10 @@ class OMRProcessor:
                 is_bottom = center_y > img_height * 0.85
                 
                 if column == 1:  # Left edge: A1(top), G1-G3(middle), A4(bottom)
-                    if is_top and area > 200:
+                    if is_top and area > 150:  # More tolerant for perspective distortion
                         positioning_squares.append(square)
                         print(f"    Found A1 (top-left) at ({x}, {y})")
-                    elif is_bottom and area > 200:
+                    elif is_bottom and area > 150:  # More tolerant for perspective distortion
                         positioning_squares.append(square)
                         print(f"    Found A4 (bottom-left) at ({x}, {y})")
                     elif not is_top and not is_bottom and area > 60:
@@ -212,10 +212,10 @@ class OMRProcessor:
                         print(f"    Found G marker (col3) at ({x}, {y})")
                         
                 elif column == 4:  # Right edge: A2(top), G14-G16(middle), A3(bottom)
-                    if is_top and area > 200:
+                    if is_top and area > 150:  # More tolerant for perspective distortion
                         positioning_squares.append(square)
                         print(f"    Found A2 (top-right) at ({x}, {y})")
-                    elif is_bottom and area > 200:
+                    elif is_bottom and area > 150:  # More tolerant for perspective distortion
                         positioning_squares.append(square)
                         print(f"    Found A3 (bottom-right) at ({x}, {y})")
                     elif not is_top and not is_bottom and area > 60:
