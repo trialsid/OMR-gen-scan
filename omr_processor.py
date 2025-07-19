@@ -410,6 +410,59 @@ class OMRProcessor:
             # Draw arc (partial circle)
             cv2.ellipse(image, center, (radius, radius), 0, start_deg, end_deg, color, thickness)
     
+    def process_roll_number_bubbles(self, roll_bubbles, result_image, color, img_width):
+        """Process roll number bubbles (3 digits, 0-9 each)"""
+        if not roll_bubbles:
+            print("    No roll number bubbles detected")
+            return
+        
+        # Expected grid: 3 columns of digits within the first column gap
+        # Based on sheet generator: 3 digit columns with bubble_spacing_x spacing
+        digit_col_spacing = 24  # bubble_radius * 3 from generator
+        
+        # Estimate the 3 digit column positions within the roll number area
+        roll_bubbles_x = [b['center'][0] for b in roll_bubbles]
+        min_x, max_x = min(roll_bubbles_x), max(roll_bubbles_x)
+        
+        # Define 3 digit columns
+        digit_columns = [
+            min_x + (max_x - min_x) * 0.2,   # Hundreds digit
+            min_x + (max_x - min_x) * 0.5,   # Tens digit  
+            min_x + (max_x - min_x) * 0.8    # Units digit
+        ]
+        
+        print(f"    Expected digit columns at x: {[f'{x:.0f}' for x in digit_columns]}")
+        
+        # Group bubbles by digit column
+        digit_tolerance = 15
+        bubbles_by_digit = [[], [], []]
+        
+        for bubble in roll_bubbles:
+            bx = bubble['center'][0]
+            for i, col_x in enumerate(digit_columns):
+                if abs(bx - col_x) < digit_tolerance:
+                    bubbles_by_digit[i].append(bubble)
+                    break
+        
+        # Process each digit column (0-9)
+        for digit_idx, digit_bubbles in enumerate(bubbles_by_digit):
+            digit_bubbles.sort(key=lambda b: b['center'][1])  # Sort by Y
+            print(f"    Digit {digit_idx + 1}: {len(digit_bubbles)} bubbles")
+            
+            # Draw detected bubbles
+            for bubble in digit_bubbles:
+                center = bubble['center']
+                radius = int(np.sqrt(bubble['area'] / np.pi))
+                cv2.circle(result_image, center, radius, color, 2)
+                cv2.circle(result_image, center, 2, color, -1)
+        
+        # Add roll number section label
+        if roll_bubbles:
+            label_x = min(roll_bubbles_x) - 50
+            label_y = min(b['center'][1] for b in roll_bubbles) + 20
+            cv2.putText(result_image, "Roll No.", (label_x, label_y), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+    
     def step8_detect_answer_bubbles(self, corrected_image):
         """Step 8: Detect answer bubbles in the corrected image"""
         print("Step 8: Detecting answer bubbles...")
@@ -435,15 +488,15 @@ class OMRProcessor:
         
         # Define bubble area boundaries (exclude marker columns)
         # Based on our 4-column structure: markers at 5%, 33%, 67%, 95%
-        # Each gap contains 4 bubbles (A,B,C,D) for one question
-        question_col1_center = img_width * 0.19  # Between column 1 and 2 markers
+        # First gap contains roll numbers and questions, other gaps contain only questions
+        roll_number_col_center = img_width * 0.19  # Between column 1 and 2 markers (roll numbers + questions)
         question_col2_center = img_width * 0.50  # Between column 2 and 3 markers  
         question_col3_center = img_width * 0.81  # Between column 3 and 4 markers
         
-        question_columns = [question_col1_center, question_col2_center, question_col3_center]
-        column_tolerance = img_width * 0.12  # 12% tolerance to capture all 4 bubbles in each question
+        all_columns = [roll_number_col_center, question_col2_center, question_col3_center]
+        column_tolerance = img_width * 0.12  # 12% tolerance to capture all bubbles in each section
         
-        print(f"  - Expected question columns at x: {question_col1_center:.0f}, {question_col2_center:.0f}, {question_col3_center:.0f}")
+        print(f"  - Expected columns at x: {roll_number_col_center:.0f} (roll+questions), {question_col2_center:.0f}, {question_col3_center:.0f}")
         
         # Detect bubble candidates
         bubble_candidates = []
@@ -463,18 +516,18 @@ class OMRProcessor:
                         center_x = x + w // 2
                         center_y = y + h // 2
                         
-                        # Check if bubble is in one of the expected question columns
-                        in_question_column = False
+                        # Check if bubble is in one of the expected columns
+                        in_column = False
                         column_index = -1
                         
-                        for i, col_x in enumerate(question_columns):
+                        for i, col_x in enumerate(all_columns):
                             if abs(center_x - col_x) < column_tolerance:
-                                in_question_column = True
+                                in_column = True
                                 column_index = i
                                 break
                         
-                        if in_question_column:
-                            # Include all bubbles in question columns (no edge filtering)
+                        if in_column:
+                            # Include all bubbles in columns (no edge filtering)
                             # We'll rely on circularity and area to distinguish from markers
                                 bubble_candidates.append({
                                     'center': (center_x, center_y),
@@ -491,29 +544,53 @@ class OMRProcessor:
             col_bubbles = [b for b in bubble_candidates if b['column'] == i]
             print(f"    Column {i+1}: {len(col_bubbles)} bubbles")
         
-        # Simply organize bubbles by column and sort by Y position (top to bottom)
-        bubbles_by_column = [[], [], []]
+        # Separate roll number bubbles from question bubbles in first column
+        roll_number_bubbles = []
+        question_bubbles_by_column = [[], [], []]
+        
+        # Determine the boundary between roll numbers and questions in first column
+        # Roll numbers are in the top part, questions in the bottom part
+        roll_question_boundary_y = img_height * 0.4  # Approximate boundary
+        
         for bubble in bubble_candidates:
             col_idx = bubble['column']
-            bubbles_by_column[col_idx].append(bubble)
+            center_y = bubble['center'][1]
+            
+            if col_idx == 0:  # First column contains both roll numbers and questions
+                if center_y < roll_question_boundary_y:
+                    # Top part = roll numbers
+                    roll_number_bubbles.append(bubble)
+                else:
+                    # Bottom part = questions
+                    question_bubbles_by_column[col_idx].append(bubble)
+            else:
+                # Other columns only have questions
+                question_bubbles_by_column[col_idx].append(bubble)
         
-        # Sort each column by Y position (top to bottom)
-        for col_bubbles in bubbles_by_column:
+        # Sort roll number bubbles and each question column by Y position (top to bottom)
+        roll_number_bubbles.sort(key=lambda b: b['center'][1])
+        for col_bubbles in question_bubbles_by_column:
             col_bubbles.sort(key=lambda b: b['center'][1])
         
-        print(f"  - Organized bubbles by column:")
-        for i, col_bubbles in enumerate(bubbles_by_column):
-            print(f"    Column {i+1}: {len(col_bubbles)} bubbles")
+        print(f"  - Organized bubbles:")
+        print(f"    Roll number bubbles: {len(roll_number_bubbles)}")
+        for i, col_bubbles in enumerate(question_bubbles_by_column):
+            print(f"    Question column {i+1}: {len(col_bubbles)} bubbles")
         
-        # Create visualization with different colors for each bubble column
+        # Create visualization with different colors for each section
         result_image = corrected_image.copy()
         
-        # Define colors for the 3 bubble columns (BGR format)
+        # Define colors (BGR format)
+        roll_number_color = (255, 255, 0)  # Cyan for roll numbers
         column_colors = [
-            (0, 255, 0),    # Green for column 1
-            (255, 0, 0),    # Blue for column 2  
-            (0, 0, 255)     # Red for column 3
+            (0, 255, 0),    # Green for question column 1
+            (255, 0, 0),    # Blue for question column 2  
+            (0, 0, 255)     # Red for question column 3
         ]
+        
+        # Process roll number bubbles first
+        print(f"  - Processing roll number section...")
+        self.process_roll_number_bubbles(roll_number_bubbles, result_image, roll_number_color, img_width)
         
         # Group bubbles into questions and add numbering
         question_number = 1
@@ -521,7 +598,7 @@ class OMRProcessor:
         
         # First pass: Learn the grid structure from all questions in each column
         learned_grids = []
-        for col_idx, col_bubbles in enumerate(bubbles_by_column):
+        for col_idx, col_bubbles in enumerate(question_bubbles_by_column):
             print(f"  - Learning grid structure for column {col_idx + 1}...")
             
             # Group bubbles by Y position to identify questions
@@ -588,7 +665,7 @@ class OMRProcessor:
         
         # Second pass: Apply learned grid to all questions
         question_number = 1
-        for col_idx, col_bubbles in enumerate(bubbles_by_column):
+        for col_idx, col_bubbles in enumerate(question_bubbles_by_column):
             color = column_colors[col_idx]
             grid_positions = learned_grids[col_idx]
             
@@ -599,113 +676,144 @@ class OMRProcessor:
             def process_question_with_learned_grid(bubbles, y_pos, q_num, grid):
                 """Process question using actual circle detection guided by learned grid"""
                 
-                
-                # Map detected bubbles to grid positions (one-to-one mapping)
+                # Enhanced circle detection that prioritizes actual printed circles
                 actual_circle_positions = []
-                used_bubbles = set()
-                tolerance = 15  # Look within 15 pixels of grid position
+                tolerance = 20  # Increased tolerance for better detection
                 
-                # First pass: map filled bubbles to closest grid positions
-                bubble_to_grid_mapping = {}
-                for bubble in bubbles:
-                    bx, by = bubble['center']
-                    best_grid_idx = None
-                    best_distance = float('inf')
+                # First pass: detect all actual circles (both filled and empty) in the question row
+                search_y_min = int(y_pos - 12)
+                search_y_max = int(y_pos + 12)
+                
+                # Search across the entire width for this question row
+                question_row_region = gray_corrected[search_y_min:search_y_max, :]
+                
+                if question_row_region.size > 0:
+                    # Use Hough circles to detect all circles in this row
+                    circles = cv2.HoughCircles(question_row_region, cv2.HOUGH_GRADIENT, 1, 15,
+                                             param1=30, param2=15, minRadius=6, maxRadius=12)
                     
-                    for i, grid_x in enumerate(grid):
-                        distance = abs(bx - grid_x)
-                        if distance < tolerance and distance < best_distance:
-                            best_grid_idx = i
-                            best_distance = distance
+                    detected_circles = []
+                    if circles is not None:
+                        circles = np.round(circles[0, :]).astype("int")
+                        for circle in circles:
+                            circle_x = circle[0]
+                            circle_y = circle[1] + search_y_min
+                            detected_circles.append((circle_x, circle_y))
                     
-                    if best_grid_idx is not None:
-                        # Only use this mapping if this grid position isn't already taken
-                        if best_grid_idx not in bubble_to_grid_mapping:
-                            bubble_to_grid_mapping[best_grid_idx] = bubble
-                        else:
-                            # Grid position already taken, check if this bubble is closer
-                            existing_bubble = bubble_to_grid_mapping[best_grid_idx]
-                            existing_distance = abs(existing_bubble['center'][0] - grid[best_grid_idx])
-                            if best_distance < existing_distance:
-                                bubble_to_grid_mapping[best_grid_idx] = bubble
-                
-                # Add mapped filled bubbles to actual_circle_positions
-                for grid_idx, bubble in bubble_to_grid_mapping.items():
-                    actual_pos = bubble['center'][0]
-                    actual_circle_positions.append((grid_idx, actual_pos, 'filled', bubble))
-                    used_bubbles.add(id(bubble))
-                
-                # Second pass: look for empty circles at unmapped grid positions
-                for i, grid_x in enumerate(grid):
-                    if i not in bubble_to_grid_mapping:  # No filled bubble mapped here
-                        # Search for empty circle outline in this area
-                        search_area = {
-                            'x_min': int(grid_x - tolerance),
-                            'x_max': int(grid_x + tolerance),
-                            'y_min': int(y_pos - 10),
-                            'y_max': int(y_pos + 10)
-                        }
+                    # Also include filled bubbles detected by contour analysis
+                    for bubble in bubbles:
+                        bx, by = bubble['center']
+                        if abs(by - y_pos) < 12:  # Within the question row
+                            detected_circles.append((bx, by))
+                    
+                    # Remove duplicates (circles detected by both methods)
+                    unique_circles = []
+                    for cx, cy in detected_circles:
+                        is_duplicate = False
+                        for ux, uy in unique_circles:
+                            if abs(cx - ux) < 10 and abs(cy - uy) < 10:
+                                is_duplicate = True
+                                break
+                        if not is_duplicate:
+                            unique_circles.append((cx, cy))
+                    
+                    print(f"    Q{q_num}: Detected {len(unique_circles)} actual circles")
+                    
+                    # Map detected circles to grid positions
+                    bubble_to_grid_mapping = {}
+                    for cx, cy in unique_circles:
+                        best_grid_idx = None
+                        best_distance = float('inf')
                         
-                        search_region = gray_corrected[search_area['y_min']:search_area['y_max'], 
-                                                     search_area['x_min']:search_area['x_max']]
+                        for i, grid_x in enumerate(grid):
+                            distance = abs(cx - grid_x)
+                            if distance < tolerance and distance < best_distance:
+                                best_grid_idx = i
+                                best_distance = distance
                         
-                        if search_region.size > 0:
-                            # Use Hough circles to detect empty circle outlines
-                            circles = cv2.HoughCircles(search_region, cv2.HOUGH_GRADIENT, 1, 20,
-                                                     param1=50, param2=30, minRadius=5, maxRadius=15)
-                            
-                            if circles is not None:
-                                circles = np.round(circles[0, :]).astype("int")
-                                if len(circles) > 0:
-                                    # Use the first detected circle
-                                    circle_x = circles[0][0] + search_area['x_min']
-                                    actual_circle_positions.append((i, circle_x, 'empty', None))
+                        if best_grid_idx is not None:
+                            if best_grid_idx not in bubble_to_grid_mapping:
+                                bubble_to_grid_mapping[best_grid_idx] = (cx, cy)
+                            else:
+                                # Check if this circle is closer to the grid position
+                                existing_x, existing_y = bubble_to_grid_mapping[best_grid_idx]
+                                existing_distance = abs(existing_x - grid[best_grid_idx])
+                                if best_distance < existing_distance:
+                                    bubble_to_grid_mapping[best_grid_idx] = (cx, cy)
+                    
+                    # Build actual circle positions from mapping
+                    for grid_idx, (circle_x, circle_y) in bubble_to_grid_mapping.items():
+                        # Check if this is a filled bubble
+                        is_filled = False
+                        matched_bubble = None
+                        for bubble in bubbles:
+                            bx, by = bubble['center']
+                            if abs(circle_x - bx) < 10 and abs(circle_y - by) < 10:
+                                is_filled = True
+                                matched_bubble = bubble
+                                break
+                        
+                        circle_type = 'filled' if is_filled else 'empty'
+                        actual_circle_positions.append((grid_idx, circle_x, circle_type, matched_bubble))
+                    
+                    print(f"    Q{q_num}: Mapped {len(actual_circle_positions)} circles to grid positions")
                 
-                # If we have actual circle positions, use those for spacing
+                # Calculate final positions using actual detected circles
                 if len(actual_circle_positions) >= 2:
                     actual_circle_positions.sort(key=lambda x: x[0])  # Sort by grid position
                     
-                    # Calculate actual spacing from detected circles
-                    actual_positions = [pos for _, pos, _, _ in actual_circle_positions]
-                    grid_indices = [idx for idx, _, _, _ in actual_circle_positions]
+                    # Use actual detected positions to refine the grid
+                    detected_positions = {}
+                    for grid_idx, actual_x, circle_type, bubble_data in actual_circle_positions:
+                        detected_positions[grid_idx] = actual_x
                     
-                    # Use actual spacing to infer missing positions
-                    if len(actual_positions) >= 2:
-                        actual_gap = (actual_positions[-1] - actual_positions[0]) / (grid_indices[-1] - grid_indices[0])
-                        actual_start = actual_positions[0] - grid_indices[0] * actual_gap
+                    # Calculate spacing from detected circles
+                    if len(detected_positions) >= 2:
+                        positions_list = sorted(detected_positions.items())
+                        actual_gap = (positions_list[-1][1] - positions_list[0][1]) / (positions_list[-1][0] - positions_list[0][0])
+                        actual_start = positions_list[0][1] - positions_list[0][0] * actual_gap
                         
+                        # Generate refined grid using actual spacing
                         final_positions = [actual_start + i * actual_gap for i in range(4)]
+                        
+                        # Fine-tune positions where we have actual detections
+                        for grid_idx, actual_x in detected_positions.items():
+                            final_positions[grid_idx] = actual_x
                     else:
-                        # Fallback to grid positions
-                        final_positions = grid
+                        # Single detection - use it and estimate others
+                        single_idx, single_x = list(detected_positions.items())[0]
+                        estimated_gap = 20  # Default gap estimate
+                        estimated_start = single_x - single_idx * estimated_gap
+                        final_positions = [estimated_start + i * estimated_gap for i in range(4)]
+                        final_positions[single_idx] = single_x
                 else:
-                    # Fallback to grid positions if no circles found
+                    # Fallback to learned grid positions if no circles detected in this row
                     final_positions = grid
                 
                 # Draw all 4 positions using actual circle positions where available
+                detected_positions_dict = {}
+                for grid_idx, actual_x, circle_type, bubble_data in actual_circle_positions:
+                    detected_positions_dict[grid_idx] = (actual_x, circle_type, bubble_data)
+                
                 for i, final_x in enumerate(final_positions):
                     final_center = (int(final_x), int(y_pos))
                     
-                    # Check if we have an actual bubble at this position
-                    found_actual = None
-                    for grid_idx, actual_x, circle_type, bubble_data in actual_circle_positions:
-                        if grid_idx == i:
-                            found_actual = (circle_type, bubble_data)
-                            break
-                    
-                    if found_actual:
-                        circle_type, bubble_data = found_actual
+                    if i in detected_positions_dict:
+                        # Use actual detected position
+                        actual_x, circle_type, bubble_data = detected_positions_dict[i]
+                        actual_center = (int(actual_x), int(y_pos))
+                        
                         if circle_type == 'filled' and bubble_data:
-                            # Draw filled bubble at actual position
+                            # Draw filled bubble at actual detected position
                             radius = int(np.sqrt(bubble_data['area'] / np.pi))
-                            cv2.circle(result_image, final_center, radius, color, 2)
-                            cv2.circle(result_image, final_center, 2, color, -1)
+                            cv2.circle(result_image, actual_center, radius, color, 2)
+                            cv2.circle(result_image, actual_center, 2, color, -1)
                         else:
-                            # Draw empty circle at actual position
+                            # Draw empty circle at actual detected position
                             radius = 8
-                            cv2.circle(result_image, final_center, radius, color, 2)
+                            cv2.circle(result_image, actual_center, radius, color, 2)
                     else:
-                        # Draw inferred bubble
+                        # No actual circle detected - draw inferred position with dashed circle
                         radius = 8
                         self.draw_dashed_circle(result_image, final_center, radius, color, 2)
                         cv2.putText(result_image, "?", (final_center[0] - 3, final_center[1] + 3), 
@@ -739,18 +847,19 @@ class OMRProcessor:
             if current_question_bubbles:
                 question_number = process_question_with_learned_grid(current_question_bubbles, current_y, question_number, grid_positions)
         
-        # Add legend for column colors
+        # Add legend for colors
         legend_y = 30
-        cv2.putText(result_image, "Col 1", (10, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, column_colors[0], 2)
-        cv2.putText(result_image, "Col 2", (70, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, column_colors[1], 2)
-        cv2.putText(result_image, "Col 3", (130, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, column_colors[2], 2)
+        cv2.putText(result_image, "Roll", (10, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, roll_number_color, 2)
+        cv2.putText(result_image, "Q1", (70, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, column_colors[0], 2)
+        cv2.putText(result_image, "Q2", (110, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, column_colors[1], 2)
+        cv2.putText(result_image, "Q3", (150, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, column_colors[2], 2)
         
         # Save step 8 result
         step8_path = self.results_dir / "step8_bubble_detection.jpg"
         cv2.imwrite(str(step8_path), result_image)
         print(f"  - Saved: {step8_path}")
         
-        return bubbles_by_column, result_image
+        return {'roll_numbers': roll_number_bubbles, 'questions': question_bubbles_by_column}, result_image
     
     def process_image_stepwise(self, image_path):
         """Process image through steps 1-8"""
@@ -779,12 +888,15 @@ class OMRProcessor:
         corrected = self.step7_crop_and_correct_perspective(original, positioning_squares)
         
         # Step 8: Detect answer bubbles
-        bubbles_by_column, bubble_image = self.step8_detect_answer_bubbles(corrected)
+        bubble_data, bubble_image = self.step8_detect_answer_bubbles(corrected)
         
         print("=" * 50)
         print("Processing complete! Check results directory for step images.")
-        total_bubbles = sum(len(col) for col in bubbles_by_column)
-        print(f"Summary: Detected {total_bubbles} total bubbles across 3 columns")
+        
+        roll_bubbles = bubble_data['roll_numbers']
+        question_bubbles = bubble_data['questions']
+        total_question_bubbles = sum(len(col) for col in question_bubbles)
+        print(f"Summary: Detected {len(roll_bubbles)} roll number bubbles and {total_question_bubbles} question bubbles")
         
         return {
             'original': original,
@@ -795,7 +907,7 @@ class OMRProcessor:
             'positioning_squares': positioning_squares,
             'grid_squares': grid_squares,
             'corrected': corrected,
-            'bubbles_by_column': bubbles_by_column,
+            'bubble_data': bubble_data,
             'bubble_image': bubble_image
         }
 

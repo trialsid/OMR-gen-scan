@@ -73,7 +73,7 @@ def create_omr_sheet_pdf(filename="sheets/omr_sheet.pdf", page_size=letter):
     # Draw roll number bubbles (3 digits: hundreds, tens, units)
     # All digits in the first column gap only
     bubble_radius = 8
-    roll_bubble_spacing_y = 20
+    roll_bubble_spacing_y = 25
     
     # Use first column gap only
     gap_center_x = start_x + (0 + 0.5) * spacing_x
