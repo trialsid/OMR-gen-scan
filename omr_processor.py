@@ -150,7 +150,7 @@ class OMRProcessor:
         col3_x = img_width * 0.67   # Right-center (G9-G13)
         col4_x = img_width * 0.95   # Right edge (A2, G14-G16, A3)
         
-        tolerance = 80  # Increased tolerance for perspective distortion
+        tolerance = 120  # Further increased tolerance for perspective distortion
         
         print(f"  - Image size: {img_width}x{img_height}")
         print(f"  - Expected marker columns at x: {col1_x:.0f}, {col2_x:.0f}, {col3_x:.0f}, {col4_x:.0f}")
@@ -191,10 +191,10 @@ class OMRProcessor:
                 is_bottom = center_y > img_height * 0.85
                 
                 if column == 1:  # Left edge: A1(top), G1-G3(middle), A4(bottom)
-                    if is_top and area > 150:  # More tolerant for perspective distortion
+                    if is_top and area > 120:  # More tolerant for perspective distortion
                         positioning_squares.append(square)
                         print(f"    Found A1 (top-left) at ({x}, {y})")
-                    elif is_bottom and area > 150:  # More tolerant for perspective distortion
+                    elif is_bottom and area > 120:  # More tolerant for perspective distortion
                         positioning_squares.append(square)
                         print(f"    Found A4 (bottom-left) at ({x}, {y})")
                     elif not is_top and not is_bottom and area > 60:
@@ -212,10 +212,10 @@ class OMRProcessor:
                         print(f"    Found G marker (col3) at ({x}, {y})")
                         
                 elif column == 4:  # Right edge: A2(top), G14-G16(middle), A3(bottom)
-                    if is_top and area > 150:  # More tolerant for perspective distortion
+                    if is_top and area > 120:  # More tolerant for perspective distortion
                         positioning_squares.append(square)
                         print(f"    Found A2 (top-right) at ({x}, {y})")
-                    elif is_bottom and area > 150:  # More tolerant for perspective distortion
+                    elif is_bottom and area > 120:  # More tolerant for perspective distortion
                         positioning_squares.append(square)
                         print(f"    Found A3 (bottom-right) at ({x}, {y})")
                     elif not is_top and not is_bottom and area > 60:
@@ -225,6 +225,12 @@ class OMRProcessor:
         print(f"  - Total squares found: {len(all_squares)}")
         print(f"  - Positioning squares: {len(positioning_squares)}")
         print(f"  - Grid squares: {len(grid_squares)}")
+        
+        # If we don't have 4 positioning squares, try alternative detection
+        if len(positioning_squares) < 4:
+            print(f"  - Attempting alternative anchor detection...")
+            positioning_squares = self.detect_anchors_by_position(all_squares, img_width, img_height)
+            print(f"  - Alternative detection found: {len(positioning_squares)} positioning squares")
         
         # Sort positioning squares by position for proper A1-A4 labeling
         if len(positioning_squares) >= 4:
@@ -293,13 +299,57 @@ class OMRProcessor:
         
         return positioning_squares, grid_squares
     
+    def detect_anchors_by_position(self, all_squares, img_width, img_height):
+        """Alternative anchor detection based on corner positions and size"""
+        print("    - Looking for large squares in corner regions...")
+        
+        # Define corner regions more liberally for perspective distortion
+        corner_regions = {
+            'top_left': {'x_min': 0, 'x_max': img_width * 0.25, 'y_min': 0, 'y_max': img_height * 0.25},
+            'top_right': {'x_min': img_width * 0.75, 'x_max': img_width, 'y_min': 0, 'y_max': img_height * 0.25},
+            'bottom_left': {'x_min': 0, 'x_max': img_width * 0.25, 'y_min': img_height * 0.75, 'y_max': img_height},
+            'bottom_right': {'x_min': img_width * 0.75, 'x_max': img_width, 'y_min': img_height * 0.75, 'y_max': img_height}
+        }
+        
+        corner_anchors = {}
+        
+        for region_name, region in corner_regions.items():
+            # Find largest square in this corner region
+            candidates = []
+            for square in all_squares:
+                x, y, w, h, area = square
+                center_x = x + w // 2
+                center_y = y + h // 2
+                
+                # Check if square is in this corner region and large enough
+                if (region['x_min'] <= center_x <= region['x_max'] and 
+                    region['y_min'] <= center_y <= region['y_max'] and
+                    area > 200):  # Large enough to be an anchor
+                    candidates.append(square)
+            
+            if candidates:
+                # Pick the largest one in this region
+                largest = max(candidates, key=lambda s: s[4])  # Sort by area
+                corner_anchors[region_name] = largest
+                x, y, w, h, area = largest
+                print(f"    - Found {region_name} anchor at ({x}, {y}) area={area:.0f}")
+        
+        # Convert to positioning squares list
+        positioning_squares = []
+        for region_name in ['top_left', 'top_right', 'bottom_right', 'bottom_left']:
+            if region_name in corner_anchors:
+                positioning_squares.append(corner_anchors[region_name])
+        
+        return positioning_squares
+    
     def step7_crop_and_correct_perspective(self, original_image, positioning_squares):
         """Step 7: Crop and correct perspective using anchor points"""
         print("Step 7: Cropping and correcting perspective...")
         
         if len(positioning_squares) < 4:
-            print(f"  - Error: Need 4 positioning squares, found {len(positioning_squares)}")
-            return original_image
+            print(f"  - Warning: Need 4 positioning squares, found {len(positioning_squares)}")
+            print("  - Attempting fallback cropping method...")
+            return self.step7_fallback_crop(original_image, positioning_squares)
         
         # Get image dimensions
         img_height, img_width = original_image.shape[:2]
@@ -391,6 +441,53 @@ class OMRProcessor:
         
         return corrected
     
+    def step7_fallback_crop(self, original_image, positioning_squares):
+        """Fallback cropping method when perspective correction fails"""
+        print("  - Using fallback cropping method...")
+        
+        img_height, img_width = original_image.shape[:2]
+        
+        if len(positioning_squares) >= 2:
+            # Use available positioning squares to estimate crop area
+            squares_x = [x for x, y, w, h, area in positioning_squares]
+            squares_y = [y for x, y, w, h, area in positioning_squares]
+            
+            # Estimate margins based on detected squares
+            left_margin = max(10, min(squares_x) - 50)
+            top_margin = max(10, min(squares_y) - 50)
+            right_margin = min(img_width - 10, max(squares_x) + 100)
+            bottom_margin = min(img_height - 10, max(squares_y) + 100)
+            
+            print(f"  - Crop area: ({left_margin}, {top_margin}) to ({right_margin}, {bottom_margin})")
+        else:
+            # Conservative crop with standard margins
+            margin_x = int(img_width * 0.05)
+            margin_y = int(img_height * 0.05)
+            left_margin = margin_x
+            top_margin = margin_y
+            right_margin = img_width - margin_x
+            bottom_margin = img_height - margin_y
+            
+            print(f"  - Using conservative crop with 5% margins")
+        
+        # Crop the image
+        cropped = original_image[top_margin:bottom_margin, left_margin:right_margin]
+        
+        # Save step 7 fallback results
+        step7a_path = self.results_dir / "step7a_perspective_detection.jpg"
+        vis_image = original_image.copy()
+        cv2.rectangle(vis_image, (left_margin, top_margin), (right_margin, bottom_margin), (0, 255, 0), 3)
+        cv2.putText(vis_image, "Fallback Crop Area", (left_margin, top_margin - 10), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        cv2.imwrite(str(step7a_path), vis_image)
+        print(f"  - Saved fallback detection: {step7a_path}")
+        
+        step7b_path = self.results_dir / "step7b_corrected_crop.jpg"
+        cv2.imwrite(str(step7b_path), cropped)
+        print(f"  - Saved fallback crop: {step7b_path}")
+        
+        return cropped
+    
     def draw_dashed_circle(self, image, center, radius, color, thickness):
         """Draw a dashed circle to indicate inferred/missing bubbles"""
         import math
@@ -456,12 +553,6 @@ class OMRProcessor:
                 cv2.circle(result_image, center, radius, color, 2)
                 cv2.circle(result_image, center, 2, color, -1)
         
-        # Add roll number section label
-        if roll_bubbles:
-            label_x = min(roll_bubbles_x) - 50
-            label_y = min(b['center'][1] for b in roll_bubbles) + 20
-            cv2.putText(result_image, "Roll No.", (label_x, label_y), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
     
     def step8_detect_answer_bubbles(self, corrected_image):
         """Step 8: Detect answer bubbles in the corrected image"""
@@ -503,15 +594,16 @@ class OMRProcessor:
         for contour in contours:
             area = cv2.contourArea(contour)
             
-            # Filter by area (bubbles should be medium-sized circles)
-            if 20 < area < 200:
-                # Check circularity
+            # Restrict to exact bubble size (radius ~8-10 pixels, area ~200-315)
+            # This filters out text numbers and other artifacts
+            if 180 < area < 350:
+                # Check circularity - bubbles should be very circular
                 perimeter = cv2.arcLength(contour, True)
                 if perimeter > 0:
                     circularity = 4 * np.pi * area / (perimeter * perimeter)
                     
-                    # Must be highly circular to be a bubble
-                    if circularity > 0.7:
+                    # High circularity requirement for bubbles
+                    if circularity > 0.75:
                         x, y, w, h = cv2.boundingRect(contour)
                         center_x = x + w // 2
                         center_y = y + h // 2
@@ -688,9 +780,9 @@ class OMRProcessor:
                 question_row_region = gray_corrected[search_y_min:search_y_max, :]
                 
                 if question_row_region.size > 0:
-                    # Use Hough circles to detect all circles in this row
+                    # Use Hough circles to detect bubbles of specific size only
                     circles = cv2.HoughCircles(question_row_region, cv2.HOUGH_GRADIENT, 1, 15,
-                                             param1=30, param2=15, minRadius=6, maxRadius=12)
+                                             param1=25, param2=12, minRadius=7, maxRadius=11)
                     
                     detected_circles = []
                     if circles is not None:
@@ -795,35 +887,21 @@ class OMRProcessor:
                 for grid_idx, actual_x, circle_type, bubble_data in actual_circle_positions:
                     detected_positions_dict[grid_idx] = (actual_x, circle_type, bubble_data)
                 
-                for i, final_x in enumerate(final_positions):
-                    final_center = (int(final_x), int(y_pos))
+                # Only draw circles that were actually detected
+                for i in detected_positions_dict:
+                    actual_x, circle_type, bubble_data = detected_positions_dict[i]
+                    actual_center = (int(actual_x), int(y_pos))
                     
-                    if i in detected_positions_dict:
-                        # Use actual detected position
-                        actual_x, circle_type, bubble_data = detected_positions_dict[i]
-                        actual_center = (int(actual_x), int(y_pos))
-                        
-                        if circle_type == 'filled' and bubble_data:
-                            # Draw filled bubble at actual detected position
-                            radius = int(np.sqrt(bubble_data['area'] / np.pi))
-                            cv2.circle(result_image, actual_center, radius, color, 2)
-                            cv2.circle(result_image, actual_center, 2, color, -1)
-                        else:
-                            # Draw empty circle at actual detected position
-                            radius = 8
-                            cv2.circle(result_image, actual_center, radius, color, 2)
+                    if circle_type == 'filled' and bubble_data:
+                        # Draw filled bubble at actual detected position
+                        radius = int(np.sqrt(bubble_data['area'] / np.pi))
+                        cv2.circle(result_image, actual_center, radius, color, 2)
+                        cv2.circle(result_image, actual_center, 2, color, -1)
                     else:
-                        # No actual circle detected - draw inferred position with dashed circle
+                        # Draw empty circle at actual detected position
                         radius = 8
-                        self.draw_dashed_circle(result_image, final_center, radius, color, 2)
-                        cv2.putText(result_image, "?", (final_center[0] - 3, final_center[1] + 3), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1)
+                        cv2.circle(result_image, actual_center, radius, color, 2)
                 
-                # Add question number
-                text_x = max(10, int(final_positions[0]) - 50)
-                text_y = int(y_pos) + 5
-                cv2.putText(result_image, f"Q{q_num}", (text_x, text_y), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
                 
                 return q_num + 1
             
@@ -847,12 +925,6 @@ class OMRProcessor:
             if current_question_bubbles:
                 question_number = process_question_with_learned_grid(current_question_bubbles, current_y, question_number, grid_positions)
         
-        # Add legend for colors
-        legend_y = 30
-        cv2.putText(result_image, "Roll", (10, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, roll_number_color, 2)
-        cv2.putText(result_image, "Q1", (70, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, column_colors[0], 2)
-        cv2.putText(result_image, "Q2", (110, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, column_colors[1], 2)
-        cv2.putText(result_image, "Q3", (150, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, column_colors[2], 2)
         
         # Save step 8 result
         step8_path = self.results_dir / "step8_bubble_detection.jpg"
