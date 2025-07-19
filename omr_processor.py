@@ -1192,14 +1192,15 @@ class OMRProcessor:
                     actual_x, circle_type, bubble_data = detected_positions_dict[i]
                     actual_center = (int(actual_x), int(y_pos))
                     
+                    # Use consistent radius for all bubbles (8 pixels)
+                    radius = 8
+                    
                     if circle_type == 'filled' and bubble_data:
-                        # Draw filled bubble at actual detected position
-                        radius = int(np.sqrt(bubble_data['area'] / np.pi))
+                        # Draw filled bubble with filled center
                         cv2.circle(result_image, actual_center, radius, color, 2)
-                        cv2.circle(result_image, actual_center, 2, color, -1)
+                        cv2.circle(result_image, actual_center, 3, color, -1)  # Slightly smaller filled center
                     else:
-                        # Draw empty circle at actual detected position
-                        radius = 8
+                        # Draw empty circle
                         cv2.circle(result_image, actual_center, radius, color, 2)
                 
                 # Add question number text next to the bubble set
@@ -1273,12 +1274,11 @@ class OMRProcessor:
             cv2.putText(result_image, "Roll Number", (roll_left, roll_top - 10), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, roll_color, 2)
             
-            # Draw roll number bubbles
+            # Draw roll number bubbles with consistent size
             for bubble in roll_bubbles:
                 center = bubble['center']
-                radius = int(np.sqrt(bubble['area'] / np.pi))
+                radius = 8  # Consistent radius for all bubbles
                 cv2.circle(result_image, center, radius, roll_color, 2)
-                cv2.circle(result_image, center, 2, roll_color, -1)
             
             print(f"  - Roll number section: ({roll_left}, {roll_top}) to ({roll_right}, {roll_bottom})")
         
@@ -1302,12 +1302,11 @@ class OMRProcessor:
                 cv2.putText(result_image, name, (col_left, col_top - 10), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
                 
-                # Draw question bubbles in the same color as rectangle
+                # Draw question bubbles with consistent size
                 for bubble in col_bubbles:
                     center = bubble['center']
-                    radius = int(np.sqrt(bubble['area'] / np.pi))
+                    radius = 8  # Consistent radius for all bubbles
                     cv2.circle(result_image, center, radius, color, 2)
-                    cv2.circle(result_image, center, 2, color, -1)
                 
                 print(f"  - {name}: ({col_left}, {col_top}) to ({col_right}, {col_bottom})")
         
@@ -1398,9 +1397,9 @@ class OMRProcessor:
                         mean_intensity = np.mean(bubble_region)
                         # Filled bubbles are darker (lower intensity)
                         if mean_intensity < 200:  # Threshold for filled bubbles
-                            radius = int(np.sqrt(area / np.pi))
+                            radius = 8  # Consistent radius for all bubbles
                             cv2.circle(result_image, center, radius, roll_color, 2)
-                            cv2.circle(result_image, center, 2, roll_color, -1)
+                            cv2.circle(result_image, center, 3, roll_color, -1)  # Filled center
                             filled_roll_count += 1
                             
                             # Record the digit (row_idx corresponds to digit 0-9)
@@ -1518,9 +1517,9 @@ class OMRProcessor:
                             # Adaptive threshold based on image characteristics
                             threshold = self.calculate_fill_threshold(corrected_image)
                             if mean_intensity < threshold:
-                                radius = int(np.sqrt(area / np.pi))
+                                radius = 8  # Consistent radius for all bubbles
                                 cv2.circle(result_image, center, radius, color, 2)
-                                cv2.circle(result_image, center, 2, color, -1)
+                                cv2.circle(result_image, center, 3, color, -1)  # Filled center
                                 filled_col_count += 1
                                 
                                 # Record the choice (A=0, B=1, C=2, D=3)
