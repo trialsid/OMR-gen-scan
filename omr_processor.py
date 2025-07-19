@@ -391,8 +391,400 @@ class OMRProcessor:
         
         return corrected
     
+    def draw_dashed_circle(self, image, center, radius, color, thickness):
+        """Draw a dashed circle to indicate inferred/missing bubbles"""
+        import math
+        
+        # Draw dashed circle by drawing small arcs
+        num_dashes = 12
+        dash_length = 2 * math.pi / num_dashes / 2  # Half circumference divided by dashes
+        
+        for i in range(num_dashes):
+            start_angle = i * 2 * math.pi / num_dashes
+            end_angle = start_angle + dash_length
+            
+            # Convert to integer degrees for OpenCV
+            start_deg = int(math.degrees(start_angle))
+            end_deg = int(math.degrees(end_angle))
+            
+            # Draw arc (partial circle)
+            cv2.ellipse(image, center, (radius, radius), 0, start_deg, end_deg, color, thickness)
+    
+    def step8_detect_answer_bubbles(self, corrected_image):
+        """Step 8: Detect answer bubbles in the corrected image"""
+        print("Step 8: Detecting answer bubbles...")
+        
+        # Convert corrected image to grayscale for processing
+        if len(corrected_image.shape) == 3:
+            gray_corrected = cv2.cvtColor(corrected_image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray_corrected = corrected_image
+        
+        # Apply preprocessing for bubble detection
+        blurred = cv2.GaussianBlur(gray_corrected, (3, 3), 0)
+        thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                     cv2.THRESH_BINARY_INV, 9, 2)
+        
+        # Find contours
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        print(f"  - Found {len(contours)} total contours in corrected image")
+        
+        # Get image dimensions
+        img_height, img_width = corrected_image.shape[:2]
+        
+        # Define bubble area boundaries (exclude marker columns)
+        # Based on our 4-column structure: markers at 5%, 33%, 67%, 95%
+        # Each gap contains 4 bubbles (A,B,C,D) for one question
+        question_col1_center = img_width * 0.19  # Between column 1 and 2 markers
+        question_col2_center = img_width * 0.50  # Between column 2 and 3 markers  
+        question_col3_center = img_width * 0.81  # Between column 3 and 4 markers
+        
+        question_columns = [question_col1_center, question_col2_center, question_col3_center]
+        column_tolerance = img_width * 0.12  # 12% tolerance to capture all 4 bubbles in each question
+        
+        print(f"  - Expected question columns at x: {question_col1_center:.0f}, {question_col2_center:.0f}, {question_col3_center:.0f}")
+        
+        # Detect bubble candidates
+        bubble_candidates = []
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            
+            # Filter by area (bubbles should be medium-sized circles)
+            if 20 < area < 200:
+                # Check circularity
+                perimeter = cv2.arcLength(contour, True)
+                if perimeter > 0:
+                    circularity = 4 * np.pi * area / (perimeter * perimeter)
+                    
+                    # Must be highly circular to be a bubble
+                    if circularity > 0.7:
+                        x, y, w, h = cv2.boundingRect(contour)
+                        center_x = x + w // 2
+                        center_y = y + h // 2
+                        
+                        # Check if bubble is in one of the expected question columns
+                        in_question_column = False
+                        column_index = -1
+                        
+                        for i, col_x in enumerate(question_columns):
+                            if abs(center_x - col_x) < column_tolerance:
+                                in_question_column = True
+                                column_index = i
+                                break
+                        
+                        if in_question_column:
+                            # Include all bubbles in question columns (no edge filtering)
+                            # We'll rely on circularity and area to distinguish from markers
+                                bubble_candidates.append({
+                                    'center': (center_x, center_y),
+                                    'area': area,
+                                    'circularity': circularity,
+                                    'column': column_index,
+                                    'contour': contour
+                                })
+        
+        print(f"  - Found {len(bubble_candidates)} bubble candidates")
+        
+        # Debug: show bubble count per column
+        for i in range(3):
+            col_bubbles = [b for b in bubble_candidates if b['column'] == i]
+            print(f"    Column {i+1}: {len(col_bubbles)} bubbles")
+        
+        # Simply organize bubbles by column and sort by Y position (top to bottom)
+        bubbles_by_column = [[], [], []]
+        for bubble in bubble_candidates:
+            col_idx = bubble['column']
+            bubbles_by_column[col_idx].append(bubble)
+        
+        # Sort each column by Y position (top to bottom)
+        for col_bubbles in bubbles_by_column:
+            col_bubbles.sort(key=lambda b: b['center'][1])
+        
+        print(f"  - Organized bubbles by column:")
+        for i, col_bubbles in enumerate(bubbles_by_column):
+            print(f"    Column {i+1}: {len(col_bubbles)} bubbles")
+        
+        # Create visualization with different colors for each bubble column
+        result_image = corrected_image.copy()
+        
+        # Define colors for the 3 bubble columns (BGR format)
+        column_colors = [
+            (0, 255, 0),    # Green for column 1
+            (255, 0, 0),    # Blue for column 2  
+            (0, 0, 255)     # Red for column 3
+        ]
+        
+        # Group bubbles into questions and add numbering
+        question_number = 1
+        question_tolerance = 15  # pixels tolerance for horizontal alignment
+        
+        # First pass: Learn the grid structure from all questions in each column
+        learned_grids = []
+        for col_idx, col_bubbles in enumerate(bubbles_by_column):
+            print(f"  - Learning grid structure for column {col_idx + 1}...")
+            
+            # Group bubbles by Y position to identify questions
+            questions = []
+            current_question_bubbles = []
+            current_y = None
+            
+            for bubble in col_bubbles:
+                bubble_y = bubble['center'][1]
+                
+                if current_y is None or abs(bubble_y - current_y) < question_tolerance:
+                    current_question_bubbles.append(bubble)
+                    if current_y is None:
+                        current_y = bubble_y
+                else:
+                    if current_question_bubbles:
+                        questions.append(current_question_bubbles)
+                    current_question_bubbles = [bubble]
+                    current_y = bubble_y
+            
+            if current_question_bubbles:
+                questions.append(current_question_bubbles)
+            
+            # Analyze X positions from questions with 3+ detected bubbles (good examples)
+            all_x_positions = []
+            for q_bubbles in questions:
+                if len(q_bubbles) >= 3:  # Good examples with most bubbles detected
+                    q_bubbles.sort(key=lambda b: b['center'][0])
+                    x_positions = [b['center'][0] for b in q_bubbles]
+                    all_x_positions.extend(x_positions)
+            
+            if len(all_x_positions) >= 8:  # Need enough data points
+                # Simple clustering approach to find 4 consistent grid positions
+                all_x_positions.sort()
+                
+                # Use histogram-based approach to find 4 peaks
+                # Create bins and count occurrences
+                min_x = min(all_x_positions)
+                max_x = max(all_x_positions)
+                bin_width = 10  # 10 pixel bins
+                bins = {}
+                
+                for x in all_x_positions:
+                    bin_key = int(x // bin_width) * bin_width
+                    bins[bin_key] = bins.get(bin_key, 0) + 1
+                
+                # Find the 4 bins with highest counts
+                sorted_bins = sorted(bins.items(), key=lambda x: x[1], reverse=True)
+                top_4_bins = sorted(sorted_bins[:4], key=lambda x: x[0])  # Sort by position
+                
+                if len(top_4_bins) == 4:
+                    # Use bin centers as grid positions
+                    grid_positions = [bin_pos + bin_width/2 for bin_pos, count in top_4_bins]
+                else:
+                    # Fallback: equal spacing
+                    gap = (max_x - min_x) / 3
+                    grid_positions = [min_x + i * gap for i in range(4)]
+                
+                print(f"    Learned grid positions: {[f'{x:.0f}' for x in grid_positions]}")
+                learned_grids.append(grid_positions)
+            else:
+                # Fallback grid if not enough data
+                learned_grids.append([50 + col_idx * 150 + i * 25 for i in range(4)])
+        
+        # Second pass: Apply learned grid to all questions
+        question_number = 1
+        for col_idx, col_bubbles in enumerate(bubbles_by_column):
+            color = column_colors[col_idx]
+            grid_positions = learned_grids[col_idx]
+            
+            # Group bubbles by Y position again
+            current_question_bubbles = []
+            current_y = None
+            
+            def process_question_with_learned_grid(bubbles, y_pos, q_num, grid):
+                """Process question using actual circle detection guided by learned grid"""
+                
+                # Debug info for problematic questions
+                if q_num == 42:
+                    print(f"    Q{q_num}: {len(bubbles)} bubbles detected at Y={y_pos:.0f}")
+                    for i, b in enumerate(bubbles):
+                        print(f"      Bubble {i}: X={b['center'][0]:.0f}, Y={b['center'][1]:.0f}")
+                    print(f"      Using learned grid: {[f'{x:.0f}' for x in grid]}")
+                
+                # Map detected bubbles to grid positions (one-to-one mapping)
+                actual_circle_positions = []
+                used_bubbles = set()
+                tolerance = 15  # Look within 15 pixels of grid position
+                
+                # First pass: map filled bubbles to closest grid positions
+                bubble_to_grid_mapping = {}
+                for bubble in bubbles:
+                    bx, by = bubble['center']
+                    best_grid_idx = None
+                    best_distance = float('inf')
+                    
+                    for i, grid_x in enumerate(grid):
+                        distance = abs(bx - grid_x)
+                        if distance < tolerance and distance < best_distance:
+                            best_grid_idx = i
+                            best_distance = distance
+                    
+                    if best_grid_idx is not None:
+                        # Only use this mapping if this grid position isn't already taken
+                        if best_grid_idx not in bubble_to_grid_mapping:
+                            bubble_to_grid_mapping[best_grid_idx] = bubble
+                        else:
+                            # Grid position already taken, check if this bubble is closer
+                            existing_bubble = bubble_to_grid_mapping[best_grid_idx]
+                            existing_distance = abs(existing_bubble['center'][0] - grid[best_grid_idx])
+                            if best_distance < existing_distance:
+                                bubble_to_grid_mapping[best_grid_idx] = bubble
+                
+                # Add mapped filled bubbles to actual_circle_positions
+                for grid_idx, bubble in bubble_to_grid_mapping.items():
+                    actual_pos = bubble['center'][0]
+                    actual_circle_positions.append((grid_idx, actual_pos, 'filled', bubble))
+                    used_bubbles.add(id(bubble))
+                    if q_num == 42:
+                        print(f"      Found filled bubble at grid position {grid_idx}: actual X={actual_pos:.0f}")
+                
+                # Second pass: look for empty circles at unmapped grid positions
+                for i, grid_x in enumerate(grid):
+                    if i not in bubble_to_grid_mapping:  # No filled bubble mapped here
+                        # Search for empty circle outline in this area
+                        search_area = {
+                            'x_min': int(grid_x - tolerance),
+                            'x_max': int(grid_x + tolerance),
+                            'y_min': int(y_pos - 10),
+                            'y_max': int(y_pos + 10)
+                        }
+                        
+                        search_region = gray_corrected[search_area['y_min']:search_area['y_max'], 
+                                                     search_area['x_min']:search_area['x_max']]
+                        
+                        if search_region.size > 0:
+                            # Use Hough circles to detect empty circle outlines
+                            circles = cv2.HoughCircles(search_region, cv2.HOUGH_GRADIENT, 1, 20,
+                                                     param1=50, param2=30, minRadius=5, maxRadius=15)
+                            
+                            if circles is not None:
+                                circles = np.round(circles[0, :]).astype("int")
+                                if len(circles) > 0:
+                                    # Use the first detected circle
+                                    circle_x = circles[0][0] + search_area['x_min']
+                                    actual_circle_positions.append((i, circle_x, 'empty', None))
+                                    if q_num == 42:
+                                        print(f"      Found empty circle at grid position {i}: actual X={circle_x:.0f}")
+                                else:
+                                    if q_num == 42:
+                                        print(f"      No circle found at grid position {i}, will infer")
+                            else:
+                                if q_num == 42:
+                                    print(f"      No circle found at grid position {i}, will infer")
+                
+                # If we have actual circle positions, use those for spacing
+                if len(actual_circle_positions) >= 2:
+                    actual_circle_positions.sort(key=lambda x: x[0])  # Sort by grid position
+                    
+                    # Calculate actual spacing from detected circles
+                    actual_positions = [pos for _, pos, _, _ in actual_circle_positions]
+                    grid_indices = [idx for idx, _, _, _ in actual_circle_positions]
+                    
+                    # Use actual spacing to infer missing positions
+                    if len(actual_positions) >= 2:
+                        actual_gap = (actual_positions[-1] - actual_positions[0]) / (grid_indices[-1] - grid_indices[0])
+                        actual_start = actual_positions[0] - grid_indices[0] * actual_gap
+                        
+                        final_positions = [actual_start + i * actual_gap for i in range(4)]
+                        
+                        if q_num == 42:
+                            print(f"      Calculated actual positions: {[f'{x:.0f}' for x in final_positions]}")
+                            print(f"      Actual gap: {actual_gap:.0f}")
+                    else:
+                        # Fallback to grid positions
+                        final_positions = grid
+                else:
+                    # Fallback to grid positions if no circles found
+                    final_positions = grid
+                
+                # Draw all 4 positions using actual circle positions where available
+                for i, final_x in enumerate(final_positions):
+                    final_center = (int(final_x), int(y_pos))
+                    
+                    # Check if we have an actual bubble at this position
+                    found_actual = None
+                    for grid_idx, actual_x, circle_type, bubble_data in actual_circle_positions:
+                        if grid_idx == i:
+                            found_actual = (circle_type, bubble_data)
+                            break
+                    
+                    if found_actual:
+                        circle_type, bubble_data = found_actual
+                        if circle_type == 'filled' and bubble_data:
+                            # Draw filled bubble at actual position
+                            radius = int(np.sqrt(bubble_data['area'] / np.pi))
+                            cv2.circle(result_image, final_center, radius, color, 2)
+                            cv2.circle(result_image, final_center, 2, color, -1)
+                        else:
+                            # Draw empty circle at actual position
+                            radius = 8
+                            cv2.circle(result_image, final_center, radius, color, 2)
+                        
+                        if q_num == 42:
+                            print(f"      Drew {circle_type} circle at position {i} (X={final_x:.0f})")
+                    else:
+                        # Draw inferred bubble
+                        radius = 8
+                        self.draw_dashed_circle(result_image, final_center, radius, color, 2)
+                        cv2.putText(result_image, "?", (final_center[0] - 3, final_center[1] + 3), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1)
+                        
+                        if q_num == 42:
+                            print(f"      Drew inferred bubble at position {i} (X={final_x:.0f})")
+                
+                if q_num == 42:
+                    actual_count = len(actual_circle_positions)
+                    inferred_count = 4 - actual_count
+                    print(f"      Total: {actual_count} actual + {inferred_count} inferred = 4 (actual circles)")
+                
+                # Add question number
+                text_x = max(10, int(final_positions[0]) - 50)
+                text_y = int(y_pos) + 5
+                cv2.putText(result_image, f"Q{q_num}", (text_x, text_y), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                
+                return q_num + 1
+            
+            for bubble in col_bubbles:
+                bubble_y = bubble['center'][1]
+                
+                # Group bubbles by Y position for question numbering
+                if current_y is None or abs(bubble_y - current_y) < question_tolerance:
+                    current_question_bubbles.append(bubble)
+                    if current_y is None:
+                        current_y = bubble_y
+                else:
+                    # Process the previous question group
+                    question_number = process_question_with_learned_grid(current_question_bubbles, current_y, question_number, grid_positions)
+                    
+                    # Start new group
+                    current_question_bubbles = [bubble]
+                    current_y = bubble_y
+            
+            # Don't forget the last group in this column
+            if current_question_bubbles:
+                question_number = process_question_with_learned_grid(current_question_bubbles, current_y, question_number, grid_positions)
+        
+        # Add legend for column colors
+        legend_y = 30
+        cv2.putText(result_image, "Col 1", (10, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, column_colors[0], 2)
+        cv2.putText(result_image, "Col 2", (70, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, column_colors[1], 2)
+        cv2.putText(result_image, "Col 3", (130, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, column_colors[2], 2)
+        
+        # Save step 8 result
+        step8_path = self.results_dir / "step8_bubble_detection.jpg"
+        cv2.imwrite(str(step8_path), result_image)
+        print(f"  - Saved: {step8_path}")
+        
+        return bubbles_by_column, result_image
+    
     def process_image_stepwise(self, image_path):
-        """Process image through steps 1-7"""
+        """Process image through steps 1-8"""
         print(f"Starting stepwise processing of: {image_path}")
         print("=" * 50)
         
@@ -417,8 +809,13 @@ class OMRProcessor:
         # Step 7: Crop and correct perspective
         corrected = self.step7_crop_and_correct_perspective(original, positioning_squares)
         
+        # Step 8: Detect answer bubbles
+        bubbles_by_column, bubble_image = self.step8_detect_answer_bubbles(corrected)
+        
         print("=" * 50)
         print("Processing complete! Check results directory for step images.")
+        total_bubbles = sum(len(col) for col in bubbles_by_column)
+        print(f"Summary: Detected {total_bubbles} total bubbles across 3 columns")
         
         return {
             'original': original,
@@ -428,7 +825,9 @@ class OMRProcessor:
             'contours': contours,
             'positioning_squares': positioning_squares,
             'grid_squares': grid_squares,
-            'corrected': corrected
+            'corrected': corrected,
+            'bubbles_by_column': bubbles_by_column,
+            'bubble_image': bubble_image
         }
 
 def main():
