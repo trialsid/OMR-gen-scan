@@ -599,12 +599,6 @@ class OMRProcessor:
             def process_question_with_learned_grid(bubbles, y_pos, q_num, grid):
                 """Process question using actual circle detection guided by learned grid"""
                 
-                # Debug info for problematic questions
-                if q_num == 42:
-                    print(f"    Q{q_num}: {len(bubbles)} bubbles detected at Y={y_pos:.0f}")
-                    for i, b in enumerate(bubbles):
-                        print(f"      Bubble {i}: X={b['center'][0]:.0f}, Y={b['center'][1]:.0f}")
-                    print(f"      Using learned grid: {[f'{x:.0f}' for x in grid]}")
                 
                 # Map detected bubbles to grid positions (one-to-one mapping)
                 actual_circle_positions = []
@@ -640,8 +634,6 @@ class OMRProcessor:
                     actual_pos = bubble['center'][0]
                     actual_circle_positions.append((grid_idx, actual_pos, 'filled', bubble))
                     used_bubbles.add(id(bubble))
-                    if q_num == 42:
-                        print(f"      Found filled bubble at grid position {grid_idx}: actual X={actual_pos:.0f}")
                 
                 # Second pass: look for empty circles at unmapped grid positions
                 for i, grid_x in enumerate(grid):
@@ -668,14 +660,6 @@ class OMRProcessor:
                                     # Use the first detected circle
                                     circle_x = circles[0][0] + search_area['x_min']
                                     actual_circle_positions.append((i, circle_x, 'empty', None))
-                                    if q_num == 42:
-                                        print(f"      Found empty circle at grid position {i}: actual X={circle_x:.0f}")
-                                else:
-                                    if q_num == 42:
-                                        print(f"      No circle found at grid position {i}, will infer")
-                            else:
-                                if q_num == 42:
-                                    print(f"      No circle found at grid position {i}, will infer")
                 
                 # If we have actual circle positions, use those for spacing
                 if len(actual_circle_positions) >= 2:
@@ -691,10 +675,6 @@ class OMRProcessor:
                         actual_start = actual_positions[0] - grid_indices[0] * actual_gap
                         
                         final_positions = [actual_start + i * actual_gap for i in range(4)]
-                        
-                        if q_num == 42:
-                            print(f"      Calculated actual positions: {[f'{x:.0f}' for x in final_positions]}")
-                            print(f"      Actual gap: {actual_gap:.0f}")
                     else:
                         # Fallback to grid positions
                         final_positions = grid
@@ -724,23 +704,12 @@ class OMRProcessor:
                             # Draw empty circle at actual position
                             radius = 8
                             cv2.circle(result_image, final_center, radius, color, 2)
-                        
-                        if q_num == 42:
-                            print(f"      Drew {circle_type} circle at position {i} (X={final_x:.0f})")
                     else:
                         # Draw inferred bubble
                         radius = 8
                         self.draw_dashed_circle(result_image, final_center, radius, color, 2)
                         cv2.putText(result_image, "?", (final_center[0] - 3, final_center[1] + 3), 
                                    cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1)
-                        
-                        if q_num == 42:
-                            print(f"      Drew inferred bubble at position {i} (X={final_x:.0f})")
-                
-                if q_num == 42:
-                    actual_count = len(actual_circle_positions)
-                    inferred_count = 4 - actual_count
-                    print(f"      Total: {actual_count} actual + {inferred_count} inferred = 4 (actual circles)")
                 
                 # Add question number
                 text_x = max(10, int(final_positions[0]) - 50)
