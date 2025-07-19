@@ -933,8 +933,85 @@ class OMRProcessor:
         
         return {'roll_numbers': roll_number_bubbles, 'questions': question_bubbles_by_column}, result_image
     
+    def step9_draw_section_rectangles(self, corrected_image, bubble_data):
+        """Step 9: Draw rectangles around each section (roll number, question columns)"""
+        print("Step 9: Drawing section rectangles...")
+        
+        result_image = corrected_image.copy()
+        img_height, img_width = corrected_image.shape[:2]
+        
+        roll_bubbles = bubble_data['roll_numbers']
+        question_bubbles_by_column = bubble_data['questions']
+        
+        # Define section colors
+        roll_color = (255, 255, 0)      # Cyan for roll number section
+        col1_color = (0, 255, 0)        # Green for questions column 1
+        col2_color = (255, 0, 0)        # Blue for questions column 2  
+        col3_color = (0, 0, 255)        # Red for questions column 3
+        
+        # Draw roll number section rectangle and bubbles
+        if roll_bubbles:
+            roll_x_coords = [b['center'][0] for b in roll_bubbles]
+            roll_y_coords = [b['center'][1] for b in roll_bubbles]
+            
+            # Add margin around roll number bubbles
+            margin = 20
+            roll_left = max(0, min(roll_x_coords) - margin)
+            roll_right = min(img_width, max(roll_x_coords) + margin)
+            roll_top = max(0, min(roll_y_coords) - margin)
+            roll_bottom = min(img_height, max(roll_y_coords) + margin)
+            
+            cv2.rectangle(result_image, (roll_left, roll_top), (roll_right, roll_bottom), roll_color, 3)
+            cv2.putText(result_image, "Roll Number", (roll_left, roll_top - 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, roll_color, 2)
+            
+            # Draw roll number bubbles
+            for bubble in roll_bubbles:
+                center = bubble['center']
+                radius = int(np.sqrt(bubble['area'] / np.pi))
+                cv2.circle(result_image, center, radius, roll_color, 2)
+                cv2.circle(result_image, center, 2, roll_color, -1)
+            
+            print(f"  - Roll number section: ({roll_left}, {roll_top}) to ({roll_right}, {roll_bottom})")
+        
+        # Draw question column rectangles
+        column_colors = [col1_color, col2_color, col3_color]
+        column_names = ["Questions Col 1", "Questions Col 2", "Questions Col 3"]
+        
+        for col_idx, (col_bubbles, color, name) in enumerate(zip(question_bubbles_by_column, column_colors, column_names)):
+            if col_bubbles:
+                col_x_coords = [b['center'][0] for b in col_bubbles]
+                col_y_coords = [b['center'][1] for b in col_bubbles]
+                
+                # Add margin around question bubbles
+                margin = 25
+                col_left = max(0, min(col_x_coords) - margin)
+                col_right = min(img_width, max(col_x_coords) + margin)
+                col_top = max(0, min(col_y_coords) - margin)
+                col_bottom = min(img_height, max(col_y_coords) + margin)
+                
+                cv2.rectangle(result_image, (col_left, col_top), (col_right, col_bottom), color, 3)
+                cv2.putText(result_image, name, (col_left, col_top - 10), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                
+                # Draw question bubbles in the same color as rectangle
+                for bubble in col_bubbles:
+                    center = bubble['center']
+                    radius = int(np.sqrt(bubble['area'] / np.pi))
+                    cv2.circle(result_image, center, radius, color, 2)
+                    cv2.circle(result_image, center, 2, color, -1)
+                
+                print(f"  - {name}: ({col_left}, {col_top}) to ({col_right}, {col_bottom})")
+        
+        # Save step 9 result
+        step9_path = self.results_dir / "step9_section_rectangles.jpg"
+        cv2.imwrite(str(step9_path), result_image)
+        print(f"  - Saved: {step9_path}")
+        
+        return result_image
+    
     def process_image_stepwise(self, image_path):
-        """Process image through steps 1-8"""
+        """Process image through steps 1-9"""
         print(f"Starting stepwise processing of: {image_path}")
         print("=" * 50)
         
@@ -962,6 +1039,9 @@ class OMRProcessor:
         # Step 8: Detect answer bubbles
         bubble_data, bubble_image = self.step8_detect_answer_bubbles(corrected)
         
+        # Step 9: Draw section rectangles
+        section_image = self.step9_draw_section_rectangles(corrected, bubble_data)
+        
         print("=" * 50)
         print("Processing complete! Check results directory for step images.")
         
@@ -980,7 +1060,8 @@ class OMRProcessor:
             'grid_squares': grid_squares,
             'corrected': corrected,
             'bubble_data': bubble_data,
-            'bubble_image': bubble_image
+            'bubble_image': bubble_image,
+            'section_image': section_image
         }
 
 def main():
