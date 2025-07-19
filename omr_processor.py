@@ -1010,8 +1010,127 @@ class OMRProcessor:
         
         return result_image
     
+    def step10_show_filled_bubbles_only(self, corrected_image, bubble_data):
+        """Step 10: Show only filled bubbles with section rectangles"""
+        print("Step 10: Showing only filled bubbles...")
+        
+        result_image = corrected_image.copy()
+        img_height, img_width = corrected_image.shape[:2]
+        
+        roll_bubbles = bubble_data['roll_numbers']
+        question_bubbles_by_column = bubble_data['questions']
+        
+        # Define section colors (same as step 9)
+        roll_color = (255, 255, 0)      # Cyan for roll number section
+        col1_color = (0, 255, 0)        # Green for questions column 1
+        col2_color = (255, 0, 0)        # Blue for questions column 2  
+        col3_color = (0, 0, 255)        # Red for questions column 3
+        
+        # Draw roll number section rectangle and only filled bubbles
+        filled_roll_count = 0
+        if roll_bubbles:
+            roll_x_coords = [b['center'][0] for b in roll_bubbles]
+            roll_y_coords = [b['center'][1] for b in roll_bubbles]
+            
+            # Add margin around roll number bubbles
+            margin = 20
+            roll_left = max(0, min(roll_x_coords) - margin)
+            roll_right = min(img_width, max(roll_x_coords) + margin)
+            roll_top = max(0, min(roll_y_coords) - margin)
+            roll_bottom = min(img_height, max(roll_y_coords) + margin)
+            
+            cv2.rectangle(result_image, (roll_left, roll_top), (roll_right, roll_bottom), roll_color, 3)
+            cv2.putText(result_image, "Roll Number", (roll_left, roll_top - 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, roll_color, 2)
+            
+            # Draw only filled roll number bubbles (check if bubble area indicates filled)
+            for bubble in roll_bubbles:
+                # Determine if bubble is filled by checking area or circularity
+                # Filled bubbles typically have higher area or different characteristics
+                center = bubble['center']
+                area = bubble['area']
+                
+                # Check if this is a filled bubble by examining the region
+                x, y = center
+                region_size = 8
+                x1, y1 = max(0, x - region_size), max(0, y - region_size)
+                x2, y2 = min(img_width, x + region_size), min(img_height, y + region_size)
+                
+                if len(corrected_image.shape) == 3:
+                    gray_image = cv2.cvtColor(corrected_image, cv2.COLOR_BGR2GRAY)
+                else:
+                    gray_image = corrected_image
+                
+                bubble_region = gray_image[y1:y2, x1:x2]
+                if bubble_region.size > 0:
+                    mean_intensity = np.mean(bubble_region)
+                    # Filled bubbles are darker (lower intensity)
+                    if mean_intensity < 200:  # Threshold for filled bubbles
+                        radius = int(np.sqrt(area / np.pi))
+                        cv2.circle(result_image, center, radius, roll_color, 2)
+                        cv2.circle(result_image, center, 2, roll_color, -1)
+                        filled_roll_count += 1
+            
+            print(f"  - Roll number section: {filled_roll_count} filled bubbles")
+        
+        # Draw question column rectangles and only filled bubbles
+        column_colors = [col1_color, col2_color, col3_color]
+        column_names = ["Questions Col 1", "Questions Col 2", "Questions Col 3"]
+        
+        for col_idx, (col_bubbles, color, name) in enumerate(zip(question_bubbles_by_column, column_colors, column_names)):
+            filled_col_count = 0
+            if col_bubbles:
+                col_x_coords = [b['center'][0] for b in col_bubbles]
+                col_y_coords = [b['center'][1] for b in col_bubbles]
+                
+                # Add margin around question bubbles
+                margin = 25
+                col_left = max(0, min(col_x_coords) - margin)
+                col_right = min(img_width, max(col_x_coords) + margin)
+                col_top = max(0, min(col_y_coords) - margin)
+                col_bottom = min(img_height, max(col_y_coords) + margin)
+                
+                cv2.rectangle(result_image, (col_left, col_top), (col_right, col_bottom), color, 3)
+                cv2.putText(result_image, name, (col_left, col_top - 10), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                
+                # Draw only filled question bubbles
+                for bubble in col_bubbles:
+                    center = bubble['center']
+                    area = bubble['area']
+                    
+                    # Check if this is a filled bubble
+                    x, y = center
+                    region_size = 8
+                    x1, y1 = max(0, x - region_size), max(0, y - region_size)
+                    x2, y2 = min(img_width, x + region_size), min(img_height, y + region_size)
+                    
+                    if len(corrected_image.shape) == 3:
+                        gray_image = cv2.cvtColor(corrected_image, cv2.COLOR_BGR2GRAY)
+                    else:
+                        gray_image = corrected_image
+                    
+                    bubble_region = gray_image[y1:y2, x1:x2]
+                    if bubble_region.size > 0:
+                        mean_intensity = np.mean(bubble_region)
+                        # Filled bubbles are darker (lower intensity)
+                        if mean_intensity < 200:  # Threshold for filled bubbles
+                            radius = int(np.sqrt(area / np.pi))
+                            cv2.circle(result_image, center, radius, color, 2)
+                            cv2.circle(result_image, center, 2, color, -1)
+                            filled_col_count += 1
+                
+                print(f"  - {name}: {filled_col_count} filled bubbles")
+        
+        # Save step 10 result
+        step10_path = self.results_dir / "step10_filled_bubbles_only.jpg"
+        cv2.imwrite(str(step10_path), result_image)
+        print(f"  - Saved: {step10_path}")
+        
+        return result_image
+    
     def process_image_stepwise(self, image_path):
-        """Process image through steps 1-9"""
+        """Process image through steps 1-10"""
         print(f"Starting stepwise processing of: {image_path}")
         print("=" * 50)
         
@@ -1042,6 +1161,9 @@ class OMRProcessor:
         # Step 9: Draw section rectangles
         section_image = self.step9_draw_section_rectangles(corrected, bubble_data)
         
+        # Step 10: Show only filled bubbles
+        filled_image = self.step10_show_filled_bubbles_only(corrected, bubble_data)
+        
         print("=" * 50)
         print("Processing complete! Check results directory for step images.")
         
@@ -1061,7 +1183,8 @@ class OMRProcessor:
             'corrected': corrected,
             'bubble_data': bubble_data,
             'bubble_image': bubble_image,
-            'section_image': section_image
+            'section_image': section_image,
+            'filled_image': filled_image
         }
 
 def main():
