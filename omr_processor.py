@@ -293,8 +293,8 @@ class OMRProcessor:
         """Step 5: Detect all contours"""
         print("Step 5: Detecting contours...")
         
-        # Find contours
-        contours, _ = cv2.findContours(thresh_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Find contours - use RETR_LIST to detect all individual shapes
+        contours, _ = cv2.findContours(thresh_image, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
         
         print(f"  - Found {len(contours)} total contours")
         
@@ -390,9 +390,9 @@ class OMRProcessor:
                     print(f"    Rejected square at ({x}, {y}) - not in any marker column")
                     continue
                 
-                # Classify based on column and position
-                is_top = center_y < img_height * 0.15
-                is_bottom = center_y > img_height * 0.85
+                # Classify based on column and position  
+                is_top = center_y < img_height * 0.25
+                is_bottom = center_y > img_height * 0.75
                 
                 if column == 1:  # Left edge: A1(top), G1-G3(middle), A4(bottom)
                     if is_top and area > 120:  # More tolerant for perspective distortion
@@ -506,6 +506,7 @@ class OMRProcessor:
     def detect_anchors_by_position(self, all_squares, img_width, img_height):
         """Alternative anchor detection based on corner positions and size"""
         print("    - Looking for large squares in corner regions...")
+        print(f"    - Image dimensions: {img_width}x{img_height}")
         
         # Define corner regions more liberally for perspective distortion
         corner_regions = {
@@ -514,6 +515,10 @@ class OMRProcessor:
             'bottom_left': {'x_min': 0, 'x_max': img_width * 0.25, 'y_min': img_height * 0.75, 'y_max': img_height},
             'bottom_right': {'x_min': img_width * 0.75, 'x_max': img_width, 'y_min': img_height * 0.75, 'y_max': img_height}
         }
+        
+        # Debug: print region boundaries
+        for region_name, region in corner_regions.items():
+            print(f"    - {region_name} region: x={region['x_min']:.0f}-{region['x_max']:.0f}, y={region['y_min']:.0f}-{region['y_max']:.0f}")
         
         corner_anchors = {}
         
@@ -525,11 +530,16 @@ class OMRProcessor:
                 center_x = x + w // 2
                 center_y = y + h // 2
                 
+                # Debug: check large squares
+                if area > 500:
+                    print(f"    - Checking large square at ({x}, {y}) center=({center_x}, {center_y}) area={area:.0f} for region {region_name}")
+                
                 # Check if square is in this corner region and large enough
                 if (region['x_min'] <= center_x <= region['x_max'] and 
                     region['y_min'] <= center_y <= region['y_max'] and
                     area > 200):  # Large enough to be an anchor
                     candidates.append(square)
+                    print(f"    - Added candidate for {region_name}: ({x}, {y}) area={area:.0f}")
             
             if candidates:
                 # Pick the largest one in this region
@@ -776,29 +786,54 @@ class OMRProcessor:
         thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
                                      cv2.THRESH_BINARY_INV, 11, 2)
         
-        # Find contours
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Find contours - use RETR_LIST to detect all individual shapes
+        contours, _ = cv2.findContours(thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
         
         # Method 2: HoughCircles detection with multiple parameter sets for better coverage
         all_circles = []
         
-        # Parameter set 1: For well-defined empty circles
-        circles1 = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, 1, 15,
-                                   param1=40, param2=20, minRadius=7, maxRadius=12)
-        if circles1 is not None:
-            all_circles.extend(circles1[0])
+        # Detect if this might be a screen capture by checking for high circle density
+        test_circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, 1, 15,
+                                       param1=40, param2=20, minRadius=7, maxRadius=12)
+        is_screen_capture = test_circles is not None and len(test_circles[0]) > 200
         
-        # Parameter set 2: For filled/darker circles (more sensitive)
-        circles2 = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, 1, 15,
-                                   param1=30, param2=15, minRadius=6, maxRadius=13)
-        if circles2 is not None:
-            all_circles.extend(circles2[0])
+        if test_circles is not None:
+            print(f"  - Initial circle detection found {len(test_circles[0])} circles")
+            if is_screen_capture:
+                print(f"  - High circle count detected - likely screen capture")
         
-        # Parameter set 3: Very sensitive for missed filled circles
-        circles3 = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, 1, 12,
-                                   param1=25, param2=12, minRadius=5, maxRadius=14)
-        if circles3 is not None:
-            all_circles.extend(circles3[0])
+        if is_screen_capture:
+            print("  - Detected screen capture - using adaptive parameters")
+            # Moderately restrictive parameters for screen captures to balance noise reduction with bubble detection
+            circles1 = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, 1, 18,
+                                       param1=50, param2=25, minRadius=7, maxRadius=12)
+            if circles1 is not None:
+                all_circles.extend(circles1[0])
+            
+            # Additional parameter set for screen captures with different sensitivities
+            circles2 = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, 1, 16,
+                                       param1=45, param2=22, minRadius=8, maxRadius=13)
+            if circles2 is not None:
+                all_circles.extend(circles2[0])
+        else:
+            # Original parameters for regular scans
+            # Parameter set 1: For well-defined empty circles
+            circles1 = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, 1, 15,
+                                       param1=40, param2=20, minRadius=7, maxRadius=12)
+            if circles1 is not None:
+                all_circles.extend(circles1[0])
+            
+            # Parameter set 2: For filled/darker circles (more sensitive)
+            circles2 = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, 1, 15,
+                                       param1=30, param2=15, minRadius=6, maxRadius=13)
+            if circles2 is not None:
+                all_circles.extend(circles2[0])
+            
+            # Parameter set 3: Very sensitive for missed filled circles
+            circles3 = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, 1, 12,
+                                       param1=25, param2=12, minRadius=5, maxRadius=14)
+            if circles3 is not None:
+                all_circles.extend(circles3[0])
         
         # Convert back to the expected format
         if all_circles:
@@ -833,16 +868,23 @@ class OMRProcessor:
         for contour in contours:
             area = cv2.contourArea(contour)
             
-            # Relaxed bubble size constraints for better filled bubble detection
-            # This filters out text numbers and other artifacts while allowing filled bubbles
-            if 150 < area < 400:
+            # Adjust constraints based on whether this is a screen capture
+            if is_screen_capture:
+                # Much stricter constraints for screen captures to avoid noise
+                area_min, area_max = 180, 350
+                circularity_min = 0.80
+            else:
+                # Relaxed constraints for regular scans
+                area_min, area_max = 150, 400
+                circularity_min = 0.65
+            
+            if area_min < area < area_max:
                 # Check circularity - bubbles should be reasonably circular
                 perimeter = cv2.arcLength(contour, True)
                 if perimeter > 0:
                     circularity = 4 * np.pi * area / (perimeter * perimeter)
                     
-                    # Relaxed circularity requirement for filled bubbles
-                    if circularity > 0.65:
+                    if circularity > circularity_min:
                         x, y, w, h = cv2.boundingRect(contour)
                         center_x = x + w // 2
                         center_y = y + h // 2
@@ -877,8 +919,13 @@ class OMRProcessor:
                 # Calculate area from radius
                 area = np.pi * radius * radius
                 
-                # Relaxed filter by size and position for better filled bubble detection
-                if 150 < area < 400:
+                # Adjust area filtering based on screen capture detection
+                if is_screen_capture:
+                    area_valid = 180 < area < 350  # Stricter for screen captures
+                else:
+                    area_valid = 150 < area < 400  # Relaxed for regular scans
+                    
+                if area_valid:
                     # Check if circle is in one of the expected columns
                     in_column = False
                     column_index = -1
