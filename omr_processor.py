@@ -1370,10 +1370,16 @@ class OMRProcessor:
         
         result_image = corrected_image.copy()
         img_height, img_width = corrected_image.shape[:2]
-        
+
+        # Cache grayscale version of corrected image for bubble analysis
+        if len(corrected_image.shape) == 3:
+            gray_corrected = cv2.cvtColor(corrected_image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray_corrected = corrected_image
+
         roll_bubbles = bubble_data['roll_numbers']
         question_bubbles_by_column = bubble_data['questions']
-        
+
         # Define section colors (same as step 9)
         roll_color = (255, 255, 0)      # Cyan for roll number section
         col1_color = (0, 255, 0)        # Green for questions column 1
@@ -1427,19 +1433,14 @@ class OMRProcessor:
                 for row_idx, bubble in enumerate(digit_bubbles):
                     center = bubble['center']
                     area = bubble['area']
-                    
+
                     # Check if this bubble is filled
                     x, y = center
                     region_size = 8
                     x1, y1 = max(0, x - region_size), max(0, y - region_size)
                     x2, y2 = min(img_width, x + region_size), min(img_height, y + region_size)
-                    
-                    if len(corrected_image.shape) == 3:
-                        gray_image = cv2.cvtColor(corrected_image, cv2.COLOR_BGR2GRAY)
-                    else:
-                        gray_image = corrected_image
-                    
-                    bubble_region = gray_image[y1:y2, x1:x2]
+
+                    bubble_region = gray_corrected[y1:y2, x1:x2]
                     if bubble_region.size > 0:
                         mean_intensity = np.mean(bubble_region)
                         # Filled bubbles are darker (lower intensity)
@@ -1477,6 +1478,9 @@ class OMRProcessor:
         column_names = ["Questions Col 1", "Questions Col 2", "Questions Col 3"]
         detected_answers = {}  # Store detected answers by question number
         
+        # Calculate adaptive fill threshold once for all question bubbles
+        fill_threshold = self.calculate_fill_threshold(corrected_image)
+
         for col_idx, (col_bubbles, color, name) in enumerate(zip(question_bubbles_by_column, column_colors, column_names)):
             filled_col_count = 0
             if col_bubbles:
@@ -1545,25 +1549,19 @@ class OMRProcessor:
                     for choice_idx, bubble in enumerate(row_bubbles):
                         center = bubble['center']
                         area = bubble['area']
-                        
+
                         # Check if this bubble is filled
                         x, y = center
                         region_size = 8
                         x1, y1 = max(0, x - region_size), max(0, y - region_size)
                         x2, y2 = min(img_width, x + region_size), min(img_height, y + region_size)
-                        
-                        if len(corrected_image.shape) == 3:
-                            gray_image = cv2.cvtColor(corrected_image, cv2.COLOR_BGR2GRAY)
-                        else:
-                            gray_image = corrected_image
-                        
-                        bubble_region = gray_image[y1:y2, x1:x2]
+
+                        bubble_region = gray_corrected[y1:y2, x1:x2]
                         if bubble_region.size > 0:
                             mean_intensity = np.mean(bubble_region)
                             # Filled bubbles are darker (lower intensity)
                             # Adaptive threshold based on image characteristics
-                            threshold = self.calculate_fill_threshold(corrected_image)
-                            if mean_intensity < threshold:
+                            if mean_intensity < fill_threshold:
                                 radius = 8  # Consistent radius for all bubbles
                                 cv2.circle(result_image, center, radius, color, 2)
                                 cv2.circle(result_image, center, 3, color, -1)  # Filled center
