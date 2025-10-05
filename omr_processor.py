@@ -293,11 +293,11 @@ class OMRProcessor:
         """Step 5: Detect all contours"""
         print("Step 5: Detecting contours...")
         
-        # Find contours - use RETR_LIST to detect all individual shapes
-        contours, _ = cv2.findContours(thresh_image, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-        
+        # Find contours - use RETR_TREE so we can inspect hierarchy (anchors have holes)
+        contours, hierarchy = cv2.findContours(thresh_image, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+
         print(f"  - Found {len(contours)} total contours")
-        
+
         # Draw all contours on original image
         result_image = original_image.copy()
         cv2.drawContours(result_image, contours, -1, (0, 255, 0), 1)
@@ -307,47 +307,72 @@ class OMRProcessor:
         cv2.imwrite(str(step5_path), result_image)
         print(f"  - Saved: {step5_path}")
         
-        return contours
+        return contours, hierarchy
     
-    def step6_detect_squares(self, contours, original_image):
+    def step6_detect_squares(self, contours, hierarchy, original_image):
         """Step 6: Detect and classify squares"""
         print("Step 6: Detecting squares...")
-        
+
+        def square_to_tuple(square):
+            return (square['x'], square['y'], square['w'], square['h'], square['area'])
+
         all_squares = []
         debug_info = {'total_contours': 0, 'area_filtered': 0, 'polygon_filtered': 0, 'aspect_filtered': 0}
-        
-        for contour in contours:
+        hierarchy_data = hierarchy[0] if hierarchy is not None else None
+
+        for idx, contour in enumerate(contours):
             debug_info['total_contours'] += 1
             # Calculate contour area
             area = cv2.contourArea(contour)
-            
+
             # More lenient area filtering for grid squares
             if area > 30 and area < 8000:
                 debug_info['area_filtered'] += 1
                 # Approximate contour to polygon - more lenient
                 epsilon = 0.03 * cv2.arcLength(contour, True)
                 approx = cv2.approxPolyDP(contour, epsilon, True)
-                
+
                 # Check if it's roughly square (4 vertices, but allow some tolerance)
                 if len(approx) >= 4 and len(approx) <= 6:
                     debug_info['polygon_filtered'] += 1
                     # Calculate bounding rectangle
                     x, y, w, h = cv2.boundingRect(contour)
                     aspect_ratio = float(w) / h
-                    
+
                     # More lenient aspect ratio for squares (scanning can distort)
                     if 0.5 <= aspect_ratio <= 2.0:
                         debug_info['aspect_filtered'] += 1
-                        all_squares.append((x, y, w, h, area))
-        
+                        has_hole = False
+
+                        if hierarchy_data is not None:
+                            child_idx = hierarchy_data[idx][2]
+                            while child_idx != -1:
+                                child_contour = contours[child_idx]
+                                child_area = cv2.contourArea(child_contour)
+                                if child_area > 10:
+                                    has_hole = True
+                                    break
+                                child_idx = hierarchy_data[child_idx][0]
+
+                        all_squares.append({
+                            'x': x,
+                            'y': y,
+                            'w': w,
+                            'h': h,
+                            'area': area,
+                            'center_x': x + w // 2,
+                            'center_y': y + h // 2,
+                            'has_hole': has_hole
+                        })
+
         print(f"  - Debug: {debug_info['total_contours']} contours -> {debug_info['area_filtered']} area OK -> {debug_info['polygon_filtered']} polygon OK -> {debug_info['aspect_filtered']} aspect OK")
-        
+
         # Sort squares by area
-        all_squares.sort(key=lambda x: x[4], reverse=True)
-        
+        all_squares.sort(key=lambda s: s['area'], reverse=True)
+
         # Get image dimensions and calculate column positions
         img_height, img_width = original_image.shape[:2]
-        
+
         # Define the 4 marker columns based on OMR sheet structure
         col1_x = img_width * 0.05   # Left edge (A1, G1-G3, A4)
         col2_x = img_width * 0.33   # Left-center (G4-G8) 
@@ -366,15 +391,15 @@ class OMRProcessor:
         if len(all_squares) > 0:
             # Show all detected squares
             print(f"  - All detected squares by area:")
-            for i, (x, y, w, h, area) in enumerate(all_squares):
-                print(f"    {i+1}: ({x}, {y}) {w}x{h} area={area:.0f}")
-            
+            for i, square in enumerate(all_squares):
+                print(f"    {i+1}: ({square['x']}, {square['y']}) {square['w']}x{square['h']} area={square['area']:.0f} hole={square['has_hole']}")
+
             # Classify squares by column and position
             for square in all_squares:
-                x, y, w, h, area = square
-                center_x = x + w // 2
-                center_y = y + h // 2
-                
+                center_x = square['center_x']
+                center_y = square['center_y']
+                area = square['area']
+
                 # Determine which column this square belongs to
                 column = None
                 if abs(center_x - col1_x) < tolerance:
@@ -387,53 +412,61 @@ class OMRProcessor:
                     column = 4
                 
                 if column is None:
-                    print(f"    Rejected square at ({x}, {y}) - not in any marker column")
+                    print(f"    Rejected square at ({square['x']}, {square['y']}) - not in any marker column")
                     continue
-                
-                # Classify based on column and position  
+
+                # Classify based on column and position
                 is_top = center_y < img_height * 0.25
                 is_bottom = center_y > img_height * 0.75
-                
-                if column == 1:  # Left edge: A1(top), G1-G3(middle), A4(bottom)
-                    if is_top and area > 120:  # More tolerant for perspective distortion
-                        positioning_squares.append(square)
-                        print(f"    Found A1 (top-left) at ({x}, {y})")
-                    elif is_bottom and area > 120:  # More tolerant for perspective distortion
-                        positioning_squares.append(square)
-                        print(f"    Found A4 (bottom-left) at ({x}, {y})")
-                    elif not is_top and not is_bottom and area > 60:
-                        grid_squares.append(square)
-                        print(f"    Found G marker (col1-middle) at ({x}, {y})")
-                        
-                elif column == 2:  # Left-center: G4-G8 (5 markers full height)
-                    if area > 60:
-                        grid_squares.append(square)
-                        print(f"    Found G marker (col2) at ({x}, {y})")
-                        
-                elif column == 3:  # Right-center: G9-G13 (5 markers full height)
-                    if area > 60:
-                        grid_squares.append(square)
-                        print(f"    Found G marker (col3) at ({x}, {y})")
-                        
-                elif column == 4:  # Right edge: A2(top), G14-G16(middle), A3(bottom)
-                    if is_top and area > 120:  # More tolerant for perspective distortion
-                        positioning_squares.append(square)
-                        print(f"    Found A2 (top-right) at ({x}, {y})")
-                    elif is_bottom and area > 120:  # More tolerant for perspective distortion
-                        positioning_squares.append(square)
-                        print(f"    Found A3 (bottom-right) at ({x}, {y})")
-                    elif not is_top and not is_bottom and area > 60:
-                        grid_squares.append(square)
-                        print(f"    Found G marker (col4-middle) at ({x}, {y})")
-        
+
+                if square['has_hole']:
+                    if column == 1:
+                        if is_top:
+                            positioning_squares.append(square_to_tuple(square))
+                            print(f"    Found A1 (top-left anchor with hollow center) at ({square['x']}, {square['y']})")
+                        elif is_bottom:
+                            positioning_squares.append(square_to_tuple(square))
+                            print(f"    Found A4 (bottom-left anchor with hollow center) at ({square['x']}, {square['y']})")
+                        else:
+                            print(f"    Ignored hollow square in column 1 at ({square['x']}, {square['y']}) - unexpected vertical position")
+                    elif column == 4:
+                        if is_top:
+                            positioning_squares.append(square_to_tuple(square))
+                            print(f"    Found A2 (top-right anchor with hollow center) at ({square['x']}, {square['y']})")
+                        elif is_bottom:
+                            positioning_squares.append(square_to_tuple(square))
+                            print(f"    Found A3 (bottom-right anchor with hollow center) at ({square['x']}, {square['y']})")
+                        else:
+                            print(f"    Ignored hollow square in column 4 at ({square['x']}, {square['y']}) - unexpected vertical position")
+                    else:
+                        print(f"    Ignored hollow square at ({square['x']}, {square['y']}) - anchors expected only in outer columns")
+                else:
+                    if column == 1:  # Left edge: G markers between anchors
+                        if not is_top and not is_bottom and area > 40:
+                            grid_squares.append(square_to_tuple(square))
+                            print(f"    Found G marker (col1-middle) at ({square['x']}, {square['y']})")
+                    elif column == 2:  # Left-center: G4-G8 (5 markers full height)
+                        if area > 40:
+                            grid_squares.append(square_to_tuple(square))
+                            print(f"    Found G marker (col2) at ({square['x']}, {square['y']})")
+                    elif column == 3:  # Right-center: G9-G13 (5 markers full height)
+                        if area > 40:
+                            grid_squares.append(square_to_tuple(square))
+                            print(f"    Found G marker (col3) at ({square['x']}, {square['y']})")
+                    elif column == 4:  # Right edge: G markers between anchors
+                        if not is_top and not is_bottom and area > 40:
+                            grid_squares.append(square_to_tuple(square))
+                            print(f"    Found G marker (col4-middle) at ({square['x']}, {square['y']})")
+
         print(f"  - Total squares found: {len(all_squares)}")
         print(f"  - Positioning squares: {len(positioning_squares)}")
         print(f"  - Grid squares: {len(grid_squares)}")
-        
+
         # If we don't have 4 positioning squares, try alternative detection
         if len(positioning_squares) < 4:
             print(f"  - Attempting alternative anchor detection...")
-            positioning_squares = self.detect_anchors_by_position(all_squares, img_width, img_height)
+            fallback_anchors = self.detect_anchors_by_position(all_squares, img_width, img_height)
+            positioning_squares = [square_to_tuple(square) for square in fallback_anchors]
             print(f"  - Alternative detection found: {len(positioning_squares)} positioning squares")
         
         # Sort positioning squares by position for proper A1-A4 labeling
@@ -507,7 +540,7 @@ class OMRProcessor:
         """Alternative anchor detection based on corner positions and size"""
         print("    - Looking for large squares in corner regions...")
         print(f"    - Image dimensions: {img_width}x{img_height}")
-        
+
         # Define corner regions more liberally for perspective distortion
         corner_regions = {
             'top_left': {'x_min': 0, 'x_max': img_width * 0.25, 'y_min': 0, 'y_max': img_height * 0.25},
@@ -521,39 +554,50 @@ class OMRProcessor:
             print(f"    - {region_name} region: x={region['x_min']:.0f}-{region['x_max']:.0f}, y={region['y_min']:.0f}-{region['y_max']:.0f}")
         
         corner_anchors = {}
-        
+
         for region_name, region in corner_regions.items():
             # Find largest square in this corner region
             candidates = []
             for square in all_squares:
-                x, y, w, h, area = square
-                center_x = x + w // 2
-                center_y = y + h // 2
-                
+                if not square.get('has_hole'):
+                    continue
+
+                x = square['x']
+                y = square['y']
+                w = square['w']
+                h = square['h']
+                area = square['area']
+                center_x = square['center_x']
+                center_y = square['center_y']
+
                 # Debug: check large squares
                 if area > 500:
                     print(f"    - Checking large square at ({x}, {y}) center=({center_x}, {center_y}) area={area:.0f} for region {region_name}")
-                
+
                 # Check if square is in this corner region and large enough
-                if (region['x_min'] <= center_x <= region['x_max'] and 
+                if (region['x_min'] <= center_x <= region['x_max'] and
                     region['y_min'] <= center_y <= region['y_max'] and
                     area > 200):  # Large enough to be an anchor
                     candidates.append(square)
                     print(f"    - Added candidate for {region_name}: ({x}, {y}) area={area:.0f}")
-            
+
             if candidates:
                 # Pick the largest one in this region
-                largest = max(candidates, key=lambda s: s[4])  # Sort by area
+                largest = max(candidates, key=lambda s: s['area'])  # Sort by area
                 corner_anchors[region_name] = largest
-                x, y, w, h, area = largest
+                x = largest['x']
+                y = largest['y']
+                w = largest['w']
+                h = largest['h']
+                area = largest['area']
                 print(f"    - Found {region_name} anchor at ({x}, {y}) area={area:.0f}")
-        
+
         # Convert to positioning squares list
         positioning_squares = []
         for region_name in ['top_left', 'top_right', 'bottom_right', 'bottom_left']:
             if region_name in corner_anchors:
                 positioning_squares.append(corner_anchors[region_name])
-        
+
         return positioning_squares
     
     def step7_crop_and_correct_perspective(self, original_image, positioning_squares):
@@ -1629,10 +1673,10 @@ class OMRProcessor:
         thresh = self.step4_thresholding(blurred)
         
         # Step 5: Detect contours
-        contours = self.step5_detect_contours(thresh, original)
-        
+        contours, hierarchy = self.step5_detect_contours(thresh, original)
+
         # Step 6: Detect squares
-        positioning_squares, grid_squares = self.step6_detect_squares(contours, original)
+        positioning_squares, grid_squares = self.step6_detect_squares(contours, hierarchy, original)
         
         # Step 7: Crop and correct perspective
         corrected = self.step7_crop_and_correct_perspective(original, positioning_squares)
@@ -1660,6 +1704,7 @@ class OMRProcessor:
             'blurred': blurred,
             'thresh': thresh,
             'contours': contours,
+            'hierarchy': hierarchy,
             'positioning_squares': positioning_squares,
             'grid_squares': grid_squares,
             'corrected': corrected,
