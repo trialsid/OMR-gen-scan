@@ -6,6 +6,7 @@ Generate a PDF with a grid of small circles using reportlab.
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter, A4
 from reportlab.lib.units import inch
+from reportlab.lib import colors
 
 def create_omr_sheet_pdf(filename="sheets/omr_sheet.pdf", page_size=letter):
     """
@@ -38,6 +39,10 @@ def create_omr_sheet_pdf(filename="sheets/omr_sheet.pdf", page_size=letter):
     # Calculate total rows
     total_rows = int((end_y - start_y) / spacing_y) + 1
     
+    # Ensure drawing defaults
+    c.setFillColor(colors.black)
+    c.setStrokeColor(colors.black)
+
     # Draw grid of squares
     y = start_y
     row_count = 0
@@ -46,14 +51,33 @@ def create_omr_sheet_pdf(filename="sheets/omr_sheet.pdf", page_size=letter):
         square_count = 0
         while square_count < num_squares_width:
             # Check if this is a corner square
-            is_corner = ((row_count == 0 or row_count == total_rows - 1) and 
+            is_corner = ((row_count == 0 or row_count == total_rows - 1) and
                         (square_count == 0 or square_count == num_squares_width - 1))
-            
+
             # Use larger size for corner squares
             current_size = square_size * 2 if is_corner else square_size
             half_size = current_size / 2
-            c.rect(x - half_size, y - half_size, current_size, current_size, stroke=1, fill=1)
-            
+
+            if is_corner:
+                # Draw an anchor with a solid outer square and hollow center to
+                # distinguish it from interior grid markers.
+                outer_x = x - half_size
+                outer_y = y - half_size
+                c.setFillColor(colors.black)
+                c.rect(outer_x, outer_y, current_size, current_size, stroke=1, fill=1)
+
+                inner_margin = current_size * 0.3
+                inner_size = current_size - 2 * inner_margin
+                if inner_size > 0:
+                    c.setFillColor(colors.white)
+                    c.rect(outer_x + inner_margin, outer_y + inner_margin,
+                           inner_size, inner_size, stroke=0, fill=1)
+
+                # Reset fill color for subsequent shapes
+                c.setFillColor(colors.black)
+            else:
+                c.rect(x - half_size, y - half_size, current_size, current_size, stroke=1, fill=1)
+
             x += spacing_x
             square_count += 1
         y += spacing_y
