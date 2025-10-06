@@ -310,13 +310,14 @@ class OMRProcessor:
         return contours, hierarchy
     
     def step6_detect_squares(self, contours, hierarchy, original_image):
-        """Step 6: Detect and classify squares"""
-        print("Step 6: Detecting squares...")
+        """Step 6: Detect and classify squares and row markers"""
+        print("Step 6: Detecting squares and row markers...")
 
         def square_to_tuple(square):
             return (square['x'], square['y'], square['w'], square['h'], square['area'])
 
         all_squares = []
+        row_markers = []
         debug_info = {'total_contours': 0, 'area_filtered': 0, 'polygon_filtered': 0, 'aspect_filtered': 0}
         hierarchy_data = hierarchy[0] if hierarchy is not None else None
 
@@ -338,6 +339,21 @@ class OMRProcessor:
                     # Calculate bounding rectangle
                     x, y, w, h = cv2.boundingRect(contour)
                     aspect_ratio = float(w) / h
+
+                    # Detect horizontal row marker bars before classifying squares
+                    if aspect_ratio >= 4.0 and h < 80:
+                        center_x = x + w // 2
+                        center_y = y + h // 2
+                        row_markers.append({
+                            'x': x,
+                            'y': y,
+                            'w': w,
+                            'h': h,
+                            'area': area,
+                            'center_x': center_x,
+                            'center_y': center_y
+                        })
+                        continue
 
                     # More lenient aspect ratio for squares (scanning can distort)
                     if 0.5 <= aspect_ratio <= 2.0:
@@ -375,14 +391,22 @@ class OMRProcessor:
 
         # Define the 4 marker columns based on OMR sheet structure
         col1_x = img_width * 0.05   # Left edge (A1, G1-G3, A4)
-        col2_x = img_width * 0.33   # Left-center (G4-G8) 
+        col2_x = img_width * 0.33   # Left-center (G4-G8)
         col3_x = img_width * 0.67   # Right-center (G9-G13)
         col4_x = img_width * 0.95   # Right edge (A2, G14-G16, A3)
-        
+
+        # Approximate centers for the three question columns (between marker columns)
+        gap_centers = [
+            (col1_x + col2_x) / 2,
+            (col2_x + col3_x) / 2,
+            (col3_x + col4_x) / 2
+        ]
+
         tolerance = 120  # Further increased tolerance for perspective distortion
-        
+
         print(f"  - Image size: {img_width}x{img_height}")
         print(f"  - Expected marker columns at x: {col1_x:.0f}, {col2_x:.0f}, {col3_x:.0f}, {col4_x:.0f}")
+        print(f"  - Expected row marker centers at x: {[f'{gc:.0f}' for gc in gap_centers]}")
         
         # Separate squares by their column position
         positioning_squares = []
@@ -458,9 +482,33 @@ class OMRProcessor:
                             grid_squares.append(square_to_tuple(square))
                             print(f"    Found G marker (col4-middle) at ({square['x']}, {square['y']})")
 
+        # Classify row markers into their respective columns
+        row_markers_by_column = []
+        if row_markers:
+            for marker in row_markers:
+                center_x = marker['center_x']
+                center_y = marker['center_y']
+
+                column_idx = None
+                min_distance = float('inf')
+                for idx, gap_center in enumerate(gap_centers):
+                    distance = abs(center_x - gap_center)
+                    if distance < min_distance and distance < tolerance:
+                        column_idx = idx
+                        min_distance = distance
+
+                if column_idx is not None:
+                    marker['column'] = column_idx
+                    row_markers_by_column.append(marker)
+                else:
+                    print(f"    Ignored row marker at ({marker['x']}, {marker['y']}) - not near any gap center")
+
         print(f"  - Total squares found: {len(all_squares)}")
         print(f"  - Positioning squares: {len(positioning_squares)}")
         print(f"  - Grid squares: {len(grid_squares)}")
+        print(f"  - Row markers: {len(row_markers_by_column)}")
+
+        row_markers_by_column.sort(key=lambda marker: (marker.get('column', -1), marker['center_y']))
 
         # If we don't have 4 positioning squares, try alternative detection
         if len(positioning_squares) < 4:
@@ -534,7 +582,7 @@ class OMRProcessor:
         cv2.imwrite(str(step6_path), result_image)
         print(f"  - Saved: {step6_path}")
         
-        return positioning_squares, grid_squares
+        return positioning_squares, grid_squares, row_markers_by_column
     
     def detect_anchors_by_position(self, all_squares, img_width, img_height):
         """Alternative anchor detection based on corner positions and size"""
@@ -598,12 +646,12 @@ class OMRProcessor:
             if region_name in corner_anchors:
                 positioning_squares.append(corner_anchors[region_name])
 
-        return positioning_squares
+        return positioning_squares, grid_squares, row_markers_by_column
     
     def step7_crop_and_correct_perspective(self, original_image, positioning_squares):
         """Step 7: Crop and correct perspective using anchor points"""
         print("Step 7: Cropping and correcting perspective...")
-        
+
         if len(positioning_squares) < 4:
             print(f"  - Warning: Need 4 positioning squares, found {len(positioning_squares)}")
             print("  - Attempting fallback cropping method...")
@@ -697,12 +745,12 @@ class OMRProcessor:
         cv2.imwrite(str(step7b_path), corrected)
         print(f"  - Saved corrected crop: {step7b_path}")
         
-        return corrected
-    
+        return corrected, matrix
+
     def step7_fallback_crop(self, original_image, positioning_squares):
         """Fallback cropping method when perspective correction fails"""
         print("  - Using fallback cropping method...")
-        
+
         img_height, img_width = original_image.shape[:2]
         
         if len(positioning_squares) >= 2:
@@ -744,7 +792,25 @@ class OMRProcessor:
         cv2.imwrite(str(step7b_path), cropped)
         print(f"  - Saved fallback crop: {step7b_path}")
         
-        return cropped
+        return cropped, None
+
+    def transform_row_markers(self, row_markers, matrix):
+        """Transform row marker centers using the perspective matrix."""
+        if not row_markers or matrix is None:
+            return row_markers or []
+
+        points = np.float32([[marker['center_x'], marker['center_y']] for marker in row_markers])
+        points = points.reshape(-1, 1, 2)
+        transformed_points = cv2.perspectiveTransform(points, matrix)
+
+        transformed_markers = []
+        for marker, transformed in zip(row_markers, transformed_points):
+            new_marker = dict(marker)
+            new_marker['center_x'] = float(transformed[0][0])
+            new_marker['center_y'] = float(transformed[0][1])
+            transformed_markers.append(new_marker)
+
+        return transformed_markers
     
     def draw_dashed_circle(self, image, center, radius, color, thickness):
         """Draw a dashed circle to indicate inferred/missing bubbles"""
@@ -812,9 +878,11 @@ class OMRProcessor:
                 cv2.circle(result_image, center, 2, color, -1)
         
     
-    def step8_detect_answer_bubbles(self, corrected_image):
+    def step8_detect_answer_bubbles(self, corrected_image, row_markers=None):
         """Step 8: Detect answer bubbles in the corrected image (improved)"""
         print("Step 8: Detecting answer bubbles...")
+
+        row_markers = row_markers or []
         
         # Convert corrected image to grayscale for processing
         if len(corrected_image.shape) == 3:
@@ -1027,15 +1095,81 @@ class OMRProcessor:
         roll_number_bubbles.sort(key=lambda b: b['center'][1])
         for col_bubbles in question_bubbles_by_column:
             col_bubbles.sort(key=lambda b: b['center'][1])
+
+        # Prepare row marker layout for each question column
+        row_markers_grouped = {0: [], 1: [], 2: []}
+        for marker in row_markers:
+            column_idx = marker.get('column')
+            if column_idx in row_markers_grouped:
+                row_markers_grouped[column_idx].append(marker)
+
+        def merge_markers(markers, merge_threshold=12):
+            if not markers:
+                return []
+
+            merged = []
+            for marker in sorted(markers, key=lambda m: m['center_y']):
+                if not merged:
+                    merged.append({
+                        'y': marker['center_y'],
+                        'x': marker['center_x'],
+                        'w': marker['w'],
+                        'h': marker['h']
+                    })
+                else:
+                    if abs(marker['center_y'] - merged[-1]['y']) < merge_threshold:
+                        merged[-1]['y'] = (merged[-1]['y'] + marker['center_y']) / 2
+                        merged[-1]['x'] = (merged[-1]['x'] + marker['center_x']) / 2
+                        merged[-1]['w'] = max(merged[-1]['w'], marker['w'])
+                        merged[-1]['h'] = max(merged[-1]['h'], marker['h'])
+                    else:
+                        merged.append({
+                            'y': marker['center_y'],
+                            'x': marker['center_x'],
+                            'w': marker['w'],
+                            'h': marker['h']
+                        })
+
+            return merged
+
+        deduped_row_markers = {}
+        for idx in range(len(all_columns)):
+            deduped_row_markers[idx] = merge_markers(row_markers_grouped.get(idx, []))
+
+        row_marker_positions = [
+            [entry['y'] for entry in deduped_row_markers.get(idx, [])]
+            for idx in range(len(all_columns))
+        ]
         
         print(f"  - Organized bubbles:")
         print(f"    Roll number bubbles: {len(roll_number_bubbles)}")
         for i, col_bubbles in enumerate(question_bubbles_by_column):
             print(f"    Question column {i+1}: {len(col_bubbles)} bubbles")
+        for i, markers in enumerate(row_marker_positions):
+            print(f"    Row markers column {i+1}: {len(markers)} markers")
         
         # Create visualization with different colors for each section
         result_image = corrected_image.copy()
-        
+
+        # Draw detected row markers for debugging
+        row_marker_color = (180, 180, 180)
+        for col_idx, markers in deduped_row_markers.items():
+            if not markers:
+                continue
+
+            col_bubbles = question_bubbles_by_column[col_idx]
+            if col_bubbles:
+                min_x = min(b['center'][0] for b in col_bubbles) - 15
+                max_x = max(b['center'][0] for b in col_bubbles) + 15
+            else:
+                column_center = all_columns[col_idx]
+                min_x = int(column_center - 30)
+                max_x = int(column_center + 30)
+
+            for marker_entry in markers:
+                y_pos = int(marker_entry['y'])
+                cv2.line(result_image, (int(min_x), y_pos), (int(max_x), y_pos), row_marker_color, 2)
+
         # Define colors (BGR format)
         roll_number_color = (255, 255, 0)  # Cyan for roll numbers
         column_colors = [
@@ -1056,27 +1190,67 @@ class OMRProcessor:
         learned_grids = []
         for col_idx, col_bubbles in enumerate(question_bubbles_by_column):
             print(f"  - Learning grid structure for column {col_idx + 1}...")
-            
-            # Group bubbles by Y position to identify questions
+
+            markers = deduped_row_markers.get(col_idx, [])
+            marker_assignment_tolerance = 12
+
+            # Group bubbles by Y position using row markers when available
             questions = []
-            current_question_bubbles = []
-            current_y = None
-            
-            for bubble in col_bubbles:
-                bubble_y = bubble['center'][1]
-                
-                if current_y is None or abs(bubble_y - current_y) < question_tolerance:
-                    current_question_bubbles.append(bubble)
-                    if current_y is None:
-                        current_y = bubble_y
-                else:
+
+            if markers:
+                remaining_bubbles = list(col_bubbles)
+
+                for marker_entry in markers:
+                    marker_y = marker_entry['y']
+                    assigned = []
+
+                    for bubble in remaining_bubbles[:]:
+                        if abs(bubble['center'][1] - marker_y) < marker_assignment_tolerance:
+                            assigned.append(bubble)
+                            remaining_bubbles.remove(bubble)
+
+                    if assigned:
+                        questions.append(assigned)
+
+                # Fallback grouping for any bubbles not aligned with markers
+                if remaining_bubbles:
+                    current_question_bubbles = []
+                    current_y = None
+
+                    for bubble in remaining_bubbles:
+                        bubble_y = bubble['center'][1]
+
+                        if current_y is None or abs(bubble_y - current_y) < question_tolerance:
+                            current_question_bubbles.append(bubble)
+                            if current_y is None:
+                                current_y = bubble_y
+                        else:
+                            if current_question_bubbles:
+                                questions.append(current_question_bubbles)
+                            current_question_bubbles = [bubble]
+                            current_y = bubble_y
+
                     if current_question_bubbles:
                         questions.append(current_question_bubbles)
-                    current_question_bubbles = [bubble]
-                    current_y = bubble_y
-            
-            if current_question_bubbles:
-                questions.append(current_question_bubbles)
+            else:
+                current_question_bubbles = []
+                current_y = None
+
+                for bubble in col_bubbles:
+                    bubble_y = bubble['center'][1]
+
+                    if current_y is None or abs(bubble_y - current_y) < question_tolerance:
+                        current_question_bubbles.append(bubble)
+                        if current_y is None:
+                            current_y = bubble_y
+                    else:
+                        if current_question_bubbles:
+                            questions.append(current_question_bubbles)
+                        current_question_bubbles = [bubble]
+                        current_y = bubble_y
+
+                if current_question_bubbles:
+                    questions.append(current_question_bubbles)
             
             # Analyze X positions from questions - focus on well-formed questions
             all_x_positions = []
@@ -1133,12 +1307,9 @@ class OMRProcessor:
             grid_positions = learned_grids[col_idx]
             
             # Group bubbles by Y position again
-            current_question_bubbles = []
-            current_y = None
-            
             def process_question_with_learned_grid(bubbles, y_pos, q_num, grid):
                 """Process question using actual circle detection guided by learned grid"""
-                
+
                 # Enhanced circle detection that prioritizes actual printed circles
                 actual_circle_positions = []
                 tolerance = 20  # Increased tolerance for better detection
@@ -1302,28 +1473,71 @@ class OMRProcessor:
                     cv2.putText(result_image, f"Q{q_num}", text_position, cv2.FONT_HERSHEY_SIMPLEX, 
                                0.4, color, 1, cv2.LINE_AA)
                 
-                
+
                 return q_num + 1
-            
-            for bubble in col_bubbles:
-                bubble_y = bubble['center'][1]
-                
-                # Group bubbles by Y position for question numbering
-                if current_y is None or abs(bubble_y - current_y) < question_tolerance:
-                    current_question_bubbles.append(bubble)
-                    if current_y is None:
+
+            markers = deduped_row_markers.get(col_idx, [])
+            marker_assignment_tolerance = 12
+
+            question_groups = []
+
+            if markers:
+                remaining_bubbles = list(col_bubbles)
+
+                for marker_entry in markers:
+                    marker_y = marker_entry['y']
+                    assigned = []
+
+                    for bubble in remaining_bubbles[:]:
+                        if abs(bubble['center'][1] - marker_y) < marker_assignment_tolerance:
+                            assigned.append(bubble)
+                            remaining_bubbles.remove(bubble)
+
+                    question_groups.append((marker_y, assigned))
+
+                if remaining_bubbles:
+                    current_question_bubbles = []
+                    current_y = None
+
+                    for bubble in remaining_bubbles:
+                        bubble_y = bubble['center'][1]
+
+                        if current_y is None or abs(bubble_y - current_y) < question_tolerance:
+                            current_question_bubbles.append(bubble)
+                            if current_y is None:
+                                current_y = bubble_y
+                        else:
+                            if current_question_bubbles:
+                                question_groups.append((current_y, current_question_bubbles))
+                            current_question_bubbles = [bubble]
+                            current_y = bubble_y
+
+                    if current_question_bubbles:
+                        question_groups.append((current_y, current_question_bubbles))
+            else:
+                current_question_bubbles = []
+                current_y = None
+
+                for bubble in col_bubbles:
+                    bubble_y = bubble['center'][1]
+
+                    if current_y is None or abs(bubble_y - current_y) < question_tolerance:
+                        current_question_bubbles.append(bubble)
+                        if current_y is None:
+                            current_y = bubble_y
+                    else:
+                        if current_question_bubbles:
+                            question_groups.append((current_y, current_question_bubbles))
+                        current_question_bubbles = [bubble]
                         current_y = bubble_y
-                else:
-                    # Process the previous question group
-                    question_number = process_question_with_learned_grid(current_question_bubbles, current_y, question_number, grid_positions)
-                    
-                    # Start new group
-                    current_question_bubbles = [bubble]
-                    current_y = bubble_y
-            
-            # Don't forget the last group in this column
-            if current_question_bubbles:
-                question_number = process_question_with_learned_grid(current_question_bubbles, current_y, question_number, grid_positions)
+
+                if current_question_bubbles:
+                    question_groups.append((current_y, current_question_bubbles))
+
+            question_groups.sort(key=lambda item: item[0])
+
+            for group_y, group_bubbles in question_groups:
+                question_number = process_question_with_learned_grid(group_bubbles, group_y, question_number, grid_positions)
         
         
         # Save step 8 result
@@ -1331,7 +1545,11 @@ class OMRProcessor:
         cv2.imwrite(str(step8_path), result_image)
         print(f"  - Saved: {step8_path}")
         
-        return {'roll_numbers': roll_number_bubbles, 'questions': question_bubbles_by_column}, result_image
+        return {
+            'roll_numbers': roll_number_bubbles,
+            'questions': question_bubbles_by_column,
+            'row_markers': row_marker_positions
+        }, result_image
     
     def step9_draw_section_rectangles(self, corrected_image, bubble_data):
         """Step 9: Draw rectangles around each section (roll number, question columns)"""
@@ -1342,6 +1560,7 @@ class OMRProcessor:
         
         roll_bubbles = bubble_data['roll_numbers']
         question_bubbles_by_column = bubble_data['questions']
+        row_marker_positions = bubble_data.get('row_markers', [[] for _ in range(len(question_bubbles_by_column))])
         
         # Define section colors
         roll_color = (255, 255, 0)      # Cyan for roll number section
@@ -1377,6 +1596,13 @@ class OMRProcessor:
         column_colors = [col1_color, col2_color, col3_color]
         column_names = ["Questions Col 1", "Questions Col 2", "Questions Col 3"]
         
+        questions_per_column = []
+        for idx, col_bubbles in enumerate(question_bubbles_by_column):
+            if idx < len(row_marker_positions) and row_marker_positions[idx]:
+                questions_per_column.append(len(row_marker_positions[idx]))
+            else:
+                questions_per_column.append(max(0, len(col_bubbles) // 4))
+
         for col_idx, (col_bubbles, color, name) in enumerate(zip(question_bubbles_by_column, column_colors, column_names)):
             if col_bubbles:
                 col_x_coords = [b['center'][0] for b in col_bubbles]
@@ -1542,38 +1768,55 @@ class OMRProcessor:
                 cv2.putText(result_image, name, (col_left, col_top - 10), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
                 
-                # Organize bubbles by question row (Y position) and choice column (X position)
-                # Group bubbles by Y position (each row is a question)
-                bubbles_by_row = {}
+                marker_positions = row_marker_positions[col_idx] if col_idx < len(row_marker_positions) else []
                 question_tolerance = 15  # pixels tolerance for horizontal alignment
-                
-                for bubble in col_bubbles:
-                    center_y = bubble['center'][1]
-                    # Find existing row or create new one
-                    assigned_row = None
-                    for existing_y in bubbles_by_row.keys():
-                        if abs(center_y - existing_y) < question_tolerance:
-                            assigned_row = existing_y
-                            break
-                    
-                    if assigned_row is None:
-                        bubbles_by_row[center_y] = []
-                        assigned_row = center_y
-                    
-                    bubbles_by_row[assigned_row].append(bubble)
-                
-                # Sort rows by Y position (top to bottom)
-                sorted_rows = sorted(bubbles_by_row.items(), key=lambda x: x[0])
-                
+                marker_assignment_tolerance = 12
+
+                marker_rows = [{'y': y, 'bubbles': []} for y in marker_positions]
+                remaining_bubbles = list(col_bubbles)
+
+                for row_entry in marker_rows:
+                    row_y = row_entry['y']
+                    for bubble in remaining_bubbles[:]:
+                        if abs(bubble['center'][1] - row_y) < marker_assignment_tolerance:
+                            row_entry['bubbles'].append(bubble)
+                            remaining_bubbles.remove(bubble)
+
+                fallback_rows = []
+                if remaining_bubbles:
+                    current_group = []
+                    current_y = None
+
+                    for bubble in remaining_bubbles:
+                        bubble_y = bubble['center'][1]
+
+                        if current_y is None or abs(bubble_y - current_y) < question_tolerance:
+                            current_group.append(bubble)
+                            if current_y is None:
+                                current_y = bubble_y
+                        else:
+                            fallback_rows.append({'y': current_y, 'bubbles': current_group})
+                            current_group = [bubble]
+                            current_y = bubble_y
+
+                    if current_group:
+                        fallback_rows.append({'y': current_y, 'bubbles': current_group})
+
+                if not marker_rows and not fallback_rows:
+                    fallback_rows = [{'y': bubble['center'][1], 'bubbles': [bubble]} for bubble in col_bubbles]
+
+                all_rows = marker_rows + fallback_rows
+                all_rows.sort(key=lambda row: row['y'])
+
                 # Process each question row
-                for row_idx, (row_y, row_bubbles) in enumerate(sorted_rows):
+                for row_idx, row_entry in enumerate(all_rows):
+                    row_y = row_entry['y']
+                    row_bubbles = row_entry['bubbles']
+
                     # Sort bubbles in this row by X position (left to right = A, B, C, D)
                     row_bubbles.sort(key=lambda b: b['center'][0])
                     
                     # Calculate question number dynamically based on layout
-                    # Each column continues from where the previous ended
-                    questions_per_column = [len(question_bubbles_by_column[i]) // 4 for i in range(len(question_bubbles_by_column))]
-                    
                     if col_idx == 0:
                         question_num = row_idx + 1
                     elif col_idx == 1:
@@ -1676,13 +1919,16 @@ class OMRProcessor:
         contours, hierarchy = self.step5_detect_contours(thresh, original)
 
         # Step 6: Detect squares
-        positioning_squares, grid_squares = self.step6_detect_squares(contours, hierarchy, original)
-        
+        positioning_squares, grid_squares, row_markers = self.step6_detect_squares(contours, hierarchy, original)
+
         # Step 7: Crop and correct perspective
-        corrected = self.step7_crop_and_correct_perspective(original, positioning_squares)
-        
+        corrected, perspective_matrix = self.step7_crop_and_correct_perspective(original, positioning_squares)
+
+        # Transform row marker positions into the corrected perspective
+        transformed_row_markers = self.transform_row_markers(row_markers, perspective_matrix)
+
         # Step 8: Detect answer bubbles
-        bubble_data, bubble_image = self.step8_detect_answer_bubbles(corrected)
+        bubble_data, bubble_image = self.step8_detect_answer_bubbles(corrected, transformed_row_markers)
         
         # Step 9: Draw section rectangles
         section_image = self.step9_draw_section_rectangles(corrected, bubble_data)

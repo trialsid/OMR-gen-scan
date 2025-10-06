@@ -128,11 +128,18 @@ def create_omr_sheet_pdf(filename="sheets/omr_sheet.pdf", page_size=letter):
     questions_text_width = c.stringWidth("Questions", "Helvetica-Bold", 12)
     questions_center_x = start_x + (0 + 0.5) * spacing_x - questions_text_width / 2
     c.drawString(questions_center_x, questions_start_y + 20, "Questions")
-    
+
+    # Establish a common baseline just beneath the header so each column starts
+    # from the exact same Y position before stepping down.
+    questions_top_y = questions_start_y - 20
+
     # Draw OMR answer bubbles starting from first column gap (below roll number)
     bubble_spacing_y = 25  # increased spacing between rows
     question_number = 1  # Track question numbers across all columns
-    
+
+    # Geometry for horizontal row markers centered on each question line
+    row_marker_height = 4
+
     # Start from all column gaps including first one (below roll number section)
     for col_gap in range(num_squares_width - 1):
         # Calculate x position for this column gap
@@ -143,29 +150,33 @@ def create_omr_sheet_pdf(filename="sheets/omr_sheet.pdf", page_size=letter):
         gap_start_x = gap_center_x - total_width / 2
         gap_spacing = bubble_spacing_x
         
-        # For first column gap, start below the roll number section and Questions header
-        # For other gaps, start from the top
-        if col_gap == 0:
-            # First column: start below Questions header
-            bubble_y = questions_start_y - 20
-        else:
-            # Other columns: start from top
-            bubble_y = start_y + (total_rows - 1) * spacing_y - 30
-        
+        # All columns share the same baseline just below the questions header
+        bubble_y = questions_top_y
+
         # Position for question number labels (to the left of bubbles)
         question_label_x = gap_start_x - 25
-        
+
         # Draw 4 answer bubbles (A, B, C, D) with question numbers
         while bubble_y >= start_y:
+            current_row_y = bubble_y
             # Draw question number label
             c.setFont("Helvetica", 8)
-            c.drawString(question_label_x, bubble_y - 3, str(question_number))
-            
+            c.drawString(question_label_x, current_row_y - 3, str(question_number))
+
             for bubble_idx in range(4):
                 bubble_x = gap_start_x + bubble_idx * gap_spacing
                 # Draw empty circles for OMR bubbles (stroke only, no fill)
-                c.circle(bubble_x, bubble_y, bubble_radius, stroke=1, fill=0)
-            
+                c.circle(bubble_x, current_row_y, bubble_radius, stroke=1, fill=0)
+
+            # Draw a consistent horizontal bar centered on the bubble row
+            row_marker_width = max(total_width - 2 * (bubble_radius + 2), total_width * 0.6)
+            marker_left = gap_center_x - row_marker_width / 2
+            marker_bottom = current_row_y - row_marker_height / 2
+            c.setStrokeColor(colors.darkgray)
+            c.rect(marker_left, marker_bottom, row_marker_width, row_marker_height, stroke=1, fill=0)
+            c.setStrokeColor(colors.black)
+            c.setFillColor(colors.black)
+
             bubble_y -= bubble_spacing_y
             question_number += 1
     
