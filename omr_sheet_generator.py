@@ -83,90 +83,104 @@ def create_omr_sheet_pdf(filename="sheets/omr_sheet.pdf", page_size=letter):
         y += spacing_y
         row_count += 1
     
-    # Add text headers
+    # Add text headers and bubble configuration
     c.setFont("Helvetica-Bold", 12)
-    
-    # Calculate positions for roll number section
-    roll_section_y = start_y + (total_rows - 1) * spacing_y - 50  # Position near top
-    
-    # Draw "Roll No." header centered in first column gap
+    bubble_radius = 8
+    bubble_spacing_y = 25  # Vertical spacing between bubble rows
+    bubble_spacing_x = bubble_radius * 3  # Horizontal spacing between bubbles
+
+    # Grid row layout for column 0:
+    # Row 0: "Roll No." label (reserved, no bubbles)
+    # Rows 1-10: Roll number bubbles (digits 0-9, 10 rows)
+    # Row 11: Gap
+    # Row 12: "Questions" label (reserved)
+    # Rows 13+: Question bubbles
+
+    # Roll number section configuration
+    num_roll_rows = 10  # Digits 0-9
+    roll_label_row = 0   # Row position for "Roll No." label (reserved)
+    roll_start_row = 1   # First row of roll bubbles (digit 0)
+    questions_gap_row = 11     # Gap above Questions label
+    questions_label_row = 12   # Row position for "Questions" label
+    questions_start_row = 13   # First row of question bubbles in column 0
+
+    # Calculate starting Y position with symmetric margins (no offset)
+    bubbles_start_y = start_y + (total_rows - 1) * spacing_y
+
+    # Configure column 0 bubble layout
+    gap_center_x = start_x + (0 + 0.5) * spacing_x
+    # Use 4-slot grid layout (same as questions) but only use first 3 slots
+    total_width = 3 * bubble_spacing_x  # Width for 4 bubble slots
+    gap_start_x = gap_center_x - total_width / 2
+
+    # Draw "Roll No." header at reserved row position
     roll_no_text_width = c.stringWidth("Roll No.", "Helvetica-Bold", 12)
     roll_no_center_x = start_x + (0 + 0.5) * spacing_x - roll_no_text_width / 2
-    c.drawString(roll_no_center_x, roll_section_y + 40, "Roll No.")
-    
-    # Draw roll number bubbles (3 digits: hundreds, tens, units)
-    # All digits in the first column gap only
-    bubble_radius = 8
-    roll_bubble_spacing_y = 25
-    
-    # Use first column gap only
-    gap_center_x = start_x + (0 + 0.5) * spacing_x
-    bubble_spacing_x = bubble_radius * 3
-    total_width = 3 * bubble_spacing_x
-    gap_start_x = gap_center_x - total_width / 2
-    
+    roll_label_y = bubbles_start_y - (roll_label_row * bubble_spacing_y)
+    c.drawString(roll_no_center_x, roll_label_y - 3, "Roll No.")
+
     # Draw digit labels (0-9) to the left of the first column
     c.setFont("Helvetica", 8)
-    label_x = gap_start_x - 25  # Position labels further to the left of first column
-    for digit in range(10):
-        bubble_y = roll_section_y - (digit * roll_bubble_spacing_y)
+    label_x = gap_start_x - 25
+    for digit in range(num_roll_rows):
+        bubble_y = bubbles_start_y - ((roll_start_row + digit) * bubble_spacing_y)
         c.drawString(label_x, bubble_y - 3, str(digit))
-    
-    # Draw 3 digit columns within the first gap
-    for digit_col in range(3):  # 3 digits (hundreds, tens, units)
+
+    # Draw roll number bubbles in first column gap (rows 0-9)
+    # Draw 3 digit columns (hundreds, tens, units) in first 3 slots of 4-slot grid
+    for digit_col in range(3):  # Use only first 3 of 4 available slots
         bubble_x = gap_start_x + digit_col * bubble_spacing_x
-        
+
         # Draw bubbles for this digit position (0-9)
-        for digit in range(10):
-            bubble_y = roll_section_y - (digit * roll_bubble_spacing_y)
-            # Draw bubble for this digit
+        for digit in range(num_roll_rows):
+            bubble_y = bubbles_start_y - ((roll_start_row + digit) * bubble_spacing_y)
             c.circle(bubble_x, bubble_y, bubble_radius, stroke=1, fill=0)
-    
-    # Draw "Questions" header centered in first column gap
-    questions_start_y = roll_section_y - (10 * roll_bubble_spacing_y) - 40
+
+    # Draw "Questions" header at reserved row position (below roll numbers)
     c.setFont("Helvetica-Bold", 12)
     questions_text_width = c.stringWidth("Questions", "Helvetica-Bold", 12)
     questions_center_x = start_x + (0 + 0.5) * spacing_x - questions_text_width / 2
-    c.drawString(questions_center_x, questions_start_y + 20, "Questions")
-    
-    # Draw OMR answer bubbles starting from first column gap (below roll number)
-    bubble_spacing_y = 25  # increased spacing between rows
+    questions_label_y = bubbles_start_y - (questions_label_row * bubble_spacing_y)
+    c.drawString(questions_center_x, questions_label_y - 3, "Questions")
+
+    # Draw OMR answer bubbles in all column gaps
     question_number = 1  # Track question numbers across all columns
-    
-    # Start from all column gaps including first one (below roll number section)
+
     for col_gap in range(num_squares_width - 1):
         # Calculate x position for this column gap
         gap_center_x = start_x + (col_gap + 0.5) * spacing_x
-        # Center the 4 bubbles within the gap with proper spacing
-        bubble_spacing_x = bubble_radius * 3  # spacing between bubble centers
-        total_width = 3 * bubble_spacing_x  # total width for 4 bubbles
+        # Center 4 bubbles within the gap using same 4-slot grid
+        total_width = 3 * bubble_spacing_x  # Width for 4 bubble slots
         gap_start_x = gap_center_x - total_width / 2
-        gap_spacing = bubble_spacing_x
-        
-        # For first column gap, start below the roll number section and Questions header
-        # For other gaps, start from the top
-        if col_gap == 0:
-            # First column: start below Questions header
-            bubble_y = questions_start_y - 20
-        else:
-            # Other columns: start from top
-            bubble_y = start_y + (total_rows - 1) * spacing_y - 30
-        
+
         # Position for question number labels (to the left of bubbles)
         question_label_x = gap_start_x - 25
-        
+
+        # Determine starting row for this column
+        if col_gap == 0:
+            # Column 0: start questions at row 12 (after roll numbers and labels)
+            start_row = questions_start_row
+        else:
+            # Columns 1-2: start questions at row 0 (aligned with roll bubbles)
+            start_row = 0
+
+        # Calculate starting Y position for this column
+        bubble_y = bubbles_start_y - (start_row * bubble_spacing_y)
+        row_index = start_row
+
         # Draw 4 answer bubbles (A, B, C, D) with question numbers
         while bubble_y >= start_y:
             # Draw question number label
             c.setFont("Helvetica", 8)
             c.drawString(question_label_x, bubble_y - 3, str(question_number))
-            
+
+            # Draw all 4 bubbles for this question
             for bubble_idx in range(4):
-                bubble_x = gap_start_x + bubble_idx * gap_spacing
-                # Draw empty circles for OMR bubbles (stroke only, no fill)
+                bubble_x = gap_start_x + bubble_idx * bubble_spacing_x
                 c.circle(bubble_x, bubble_y, bubble_radius, stroke=1, fill=0)
-            
+
             bubble_y -= bubble_spacing_y
+            row_index += 1
             question_number += 1
     
     # Save the PDF
