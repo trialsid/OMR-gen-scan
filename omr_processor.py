@@ -813,848 +813,420 @@ class OMRProcessor:
         
     
     def step8_detect_answer_bubbles(self, corrected_image):
-        """Step 8: Detect answer bubbles in the corrected image (improved)"""
+        """Step 8: Detect answer bubbles using the layout defined in the sheet generator"""
         print("Step 8: Detecting answer bubbles...")
-        
-        # Convert corrected image to grayscale for processing
+
         if len(corrected_image.shape) == 3:
             gray_corrected = cv2.cvtColor(corrected_image, cv2.COLOR_BGR2GRAY)
         else:
             gray_corrected = corrected_image
-        
-        # Enhanced preprocessing for better bubble detection
-        # Use multiple techniques to ensure robust circle detection
+
         blurred = cv2.GaussianBlur(gray_corrected, (5, 5), 0)
-        
-        # Method 1: Contour-based detection (existing)
-        thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                     cv2.THRESH_BINARY_INV, 11, 2)
-        
-        # Find contours - use RETR_LIST to detect all individual shapes
-        contours, _ = cv2.findContours(thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-        
-        # Method 2: HoughCircles detection with multiple parameter sets for better coverage
-        all_circles = []
-        
-        # Detect if this might be a screen capture by checking for high circle density
-        test_circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, 1, 15,
-                                       param1=40, param2=20, minRadius=7, maxRadius=12)
-        is_screen_capture = test_circles is not None and len(test_circles[0]) > 200
-        
-        if test_circles is not None:
-            print(f"  - Initial circle detection found {len(test_circles[0])} circles")
-            if is_screen_capture:
-                print(f"  - High circle count detected - likely screen capture")
-        
-        if is_screen_capture:
-            print("  - Detected screen capture - using adaptive parameters")
-            # Moderately restrictive parameters for screen captures to balance noise reduction with bubble detection
-            circles1 = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, 1, 18,
-                                       param1=50, param2=25, minRadius=7, maxRadius=12)
-            if circles1 is not None:
-                all_circles.extend(circles1[0])
-            
-            # Additional parameter set for screen captures with different sensitivities
-            circles2 = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, 1, 16,
-                                       param1=45, param2=22, minRadius=8, maxRadius=13)
-            if circles2 is not None:
-                all_circles.extend(circles2[0])
-        else:
-            # Original parameters for regular scans
-            # Parameter set 1: For well-defined empty circles
-            circles1 = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, 1, 15,
-                                       param1=40, param2=20, minRadius=7, maxRadius=12)
-            if circles1 is not None:
-                all_circles.extend(circles1[0])
-            
-            # Parameter set 2: For filled/darker circles (more sensitive)
-            circles2 = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, 1, 15,
-                                       param1=30, param2=15, minRadius=6, maxRadius=13)
-            if circles2 is not None:
-                all_circles.extend(circles2[0])
-            
-            # Parameter set 3: Very sensitive for missed filled circles
-            circles3 = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, 1, 12,
-                                       param1=25, param2=12, minRadius=5, maxRadius=14)
-            if circles3 is not None:
-                all_circles.extend(circles3[0])
-        
-        # Convert back to the expected format
-        if all_circles:
-            circles = np.array([all_circles])
-        else:
-            circles = None
-        
-        print(f"  - Found {len(contours)} total contours in corrected image")
-        if circles is not None:
-            print(f"  - Found {len(circles[0])} circles via HoughCircles")
-        
-        # Get image dimensions
+        thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                       cv2.THRESH_BINARY_INV, 11, 2)
+
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        print(f"  - Found {len(contours)} contours in corrected image")
+
         img_height, img_width = corrected_image.shape[:2]
-        
-        # Define bubble area boundaries (exclude marker columns)
-        # Based on our 4-column structure: markers at 5%, 33%, 67%, 95%
-        # First gap contains roll numbers and questions, other gaps contain only questions
-        roll_number_col_center = img_width * 0.19  # Between column 1 and 2 markers (roll numbers + questions)
-        question_col2_center = img_width * 0.50  # Between column 2 and 3 markers  
-        question_col3_center = img_width * 0.81  # Between column 3 and 4 markers
-        
-        all_columns = [roll_number_col_center, question_col2_center, question_col3_center]
-        column_tolerance = img_width * 0.12  # 12% tolerance to capture all bubbles in each section
-        
-        print(f"  - Expected columns at x: {roll_number_col_center:.0f} (roll+questions), {question_col2_center:.0f}, {question_col3_center:.0f}")
-        
-        # Combined bubble detection using both contours and HoughCircles
+
+        def measure_mean_intensity(center, radius):
+            x, y = center
+            sample_radius = max(4, int(radius * 0.7))
+            x1 = max(0, x - sample_radius)
+            y1 = max(0, y - sample_radius)
+            x2 = min(img_width, x + sample_radius)
+            y2 = min(img_height, y + sample_radius)
+
+            region = gray_corrected[y1:y2, x1:x2]
+            if region.size == 0:
+                return 255.0
+            return float(np.mean(region))
+
+        # Detect circular contours that correspond to bubbles
         bubble_candidates = []
-        detected_positions = set()  # Track positions to avoid duplicates
-        
-        # Method 1: Process contours
         for contour in contours:
             area = cv2.contourArea(contour)
-            
-            # Adjust constraints based on whether this is a screen capture
-            if is_screen_capture:
-                # Much stricter constraints for screen captures to avoid noise
-                area_min, area_max = 180, 350
-                circularity_min = 0.80
-            else:
-                # Relaxed constraints for regular scans
-                area_min, area_max = 150, 400
-                circularity_min = 0.65
-            
-            if area_min < area < area_max:
-                # Check circularity - bubbles should be reasonably circular
-                perimeter = cv2.arcLength(contour, True)
-                if perimeter > 0:
-                    circularity = 4 * np.pi * area / (perimeter * perimeter)
-                    
-                    if circularity > circularity_min:
-                        x, y, w, h = cv2.boundingRect(contour)
-                        center_x = x + w // 2
-                        center_y = y + h // 2
-                        
-                        # Check if bubble is in one of the expected columns
-                        in_column = False
-                        column_index = -1
-                        
-                        for i, col_x in enumerate(all_columns):
-                            if abs(center_x - col_x) < column_tolerance:
-                                in_column = True
-                                column_index = i
-                                break
-                        
-                        if in_column:
-                            pos_key = (center_x // 5, center_y // 5)  # Group nearby positions
-                            if pos_key not in detected_positions:
-                                detected_positions.add(pos_key)
-                                bubble_candidates.append({
-                                    'center': (center_x, center_y),
-                                    'area': area,
-                                    'circularity': circularity,
-                                    'column': column_index,
-                                    'contour': contour,
-                                    'method': 'contour'
-                                })
-        
-        # Method 2: Process HoughCircles (these are often more accurate for perfect circles)
-        if circles is not None:
-            circles = np.round(circles[0, :]).astype("int")
-            for (center_x, center_y, radius) in circles:
-                # Calculate area from radius
-                area = np.pi * radius * radius
-                
-                # Adjust area filtering based on screen capture detection
-                if is_screen_capture:
-                    area_valid = 180 < area < 350  # Stricter for screen captures
-                else:
-                    area_valid = 150 < area < 400  # Relaxed for regular scans
-                    
-                if area_valid:
-                    # Check if circle is in one of the expected columns
-                    in_column = False
-                    column_index = -1
-                    
-                    for i, col_x in enumerate(all_columns):
-                        if abs(center_x - col_x) < column_tolerance:
-                            in_column = True
-                            column_index = i
-                            break
-                    
-                    if in_column:
-                        pos_key = (center_x // 5, center_y // 5)  # Group nearby positions
-                        if pos_key not in detected_positions:
-                            detected_positions.add(pos_key)
-                            bubble_candidates.append({
-                                'center': (center_x, center_y),
-                                'area': area,
-                                'circularity': 1.0,  # HoughCircles are perfect circles
-                                'column': column_index,
-                                'contour': None,
-                                'method': 'hough'
-                            })
-        
-        print(f"  - Found {len(bubble_candidates)} bubble candidates")
-        
-        # Debug: show bubble count per column
-        for i in range(3):
-            col_bubbles = [b for b in bubble_candidates if b['column'] == i]
-            print(f"    Column {i+1}: {len(col_bubbles)} bubbles")
-        
-        # Separate roll number bubbles from question bubbles in first column
-        roll_number_bubbles = []
-        question_bubbles_by_column = [[], [], []]
-        
-        # Determine the boundary between roll numbers and questions in first column
-        # Roll numbers are in the top part, questions in the bottom part
-        roll_question_boundary_y = img_height * 0.4  # Approximate boundary
-        
+            if area < 50 or area > 700:
+                continue
+
+            perimeter = cv2.arcLength(contour, True)
+            if perimeter == 0:
+                continue
+
+            circularity = 4 * np.pi * area / (perimeter * perimeter)
+            if circularity < 0.55:
+                continue
+
+            x, y, w, h = cv2.boundingRect(contour)
+            center = (int(x + w / 2), int(y + h / 2))
+            radius = (w + h) / 4.0
+
+            duplicate = False
+            for existing in bubble_candidates:
+                if abs(existing['center'][0] - center[0]) < 6 and abs(existing['center'][1] - center[1]) < 6:
+                    duplicate = True
+                    break
+            if duplicate:
+                continue
+
+            mean_intensity = measure_mean_intensity(center, radius)
+
+            bubble_candidates.append({
+                'center': center,
+                'radius': radius,
+                'area': area,
+                'mean_intensity': mean_intensity
+            })
+
+        print(f"  - Bubble candidates after filtering: {len(bubble_candidates)}")
+
+        if not bubble_candidates:
+            step8_path = self.results_dir / "step8_bubble_detection.jpg"
+            cv2.imwrite(str(step8_path), corrected_image)
+            print(f"  - Saved: {step8_path}")
+            return {'roll_numbers': {'bubbles': [], 'detected_digits': [None, None, None]}, 'questions': []}, corrected_image
+
+        # Cluster bubbles into the three answer regions (roll/questions column, middle, right)
+        x_samples = np.float32([[b['center'][0]] for b in bubble_candidates])
+        try:
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 40, 0.2)
+            _, _, centers = cv2.kmeans(x_samples, 3, None, criteria, 10, cv2.KMEANS_PP_CENTERS)
+            column_centers = sorted([float(c[0]) for c in centers])
+        except cv2.error:
+            column_centers = [img_width * 0.19, img_width * 0.50, img_width * 0.81]
+
+        print(f"  - Column centers: {[f'{c:.1f}' for c in column_centers]}")
+
         for bubble in bubble_candidates:
-            col_idx = bubble['column']
-            center_y = bubble['center'][1]
-            
-            if col_idx == 0:  # First column contains both roll numbers and questions
-                if center_y < roll_question_boundary_y:
-                    # Top part = roll numbers
-                    roll_number_bubbles.append(bubble)
-                else:
-                    # Bottom part = questions
-                    question_bubbles_by_column[col_idx].append(bubble)
-            else:
-                # Other columns only have questions
-                question_bubbles_by_column[col_idx].append(bubble)
-        
-        # Sort roll number bubbles and each question column by Y position (top to bottom)
-        roll_number_bubbles.sort(key=lambda b: b['center'][1])
-        for col_bubbles in question_bubbles_by_column:
-            col_bubbles.sort(key=lambda b: b['center'][1])
-        
-        print(f"  - Organized bubbles:")
-        print(f"    Roll number bubbles: {len(roll_number_bubbles)}")
-        for i, col_bubbles in enumerate(question_bubbles_by_column):
-            print(f"    Question column {i+1}: {len(col_bubbles)} bubbles")
-        
-        # Create visualization with different colors for each section
-        result_image = corrected_image.copy()
-        
-        # Define colors (BGR format)
-        roll_number_color = (255, 255, 0)  # Cyan for roll numbers
+            distances = [abs(bubble['center'][0] - c) for c in column_centers]
+            bubble['column_index'] = int(np.argmin(distances))
+
+        def estimate_row_spacing(values):
+            if len(values) < 2:
+                return 25.0
+            values = sorted(values)
+            diffs = [values[i + 1] - values[i] for i in range(len(values) - 1)]
+            diffs = [d for d in diffs if 5 < d < 80]
+            if not diffs:
+                return 25.0
+            return float(np.median(diffs))
+
+        def group_rows(bubbles, tolerance):
+            rows = []
+            for bubble in sorted(bubbles, key=lambda b: b['center'][1]):
+                assigned = False
+                for row in rows:
+                    if abs(bubble['center'][1] - row['y']) <= tolerance:
+                        row['bubbles'].append(bubble)
+                        row['y_values'].append(bubble['center'][1])
+                        row['y'] = float(np.mean(row['y_values']))
+                        assigned = True
+                        break
+                if not assigned:
+                    rows.append({'y': float(bubble['center'][1]), 'y_values': [bubble['center'][1]], 'bubbles': [bubble]})
+            return rows
+
+        first_column_bubbles = [b for b in bubble_candidates if b['column_index'] == 0]
+        base_spacing = estimate_row_spacing([b['center'][1] for b in first_column_bubbles])
+        row_tolerance = max(8.0, base_spacing * 0.45)
+
+        print(f"  - Estimated row spacing: {base_spacing:.2f} (tolerance {row_tolerance:.2f})")
+
+        fill_threshold = self.calculate_fill_threshold(gray_corrected)
+        print(f"  - Using fill threshold: {fill_threshold}")
+
+        roll_data = {'bubbles': [], 'detected_digits': [None, None, None]}
+        questions = []
+
         column_colors = [
-            (0, 255, 0),    # Green for question column 1
-            (255, 0, 0),    # Blue for question column 2  
-            (0, 0, 255)     # Red for question column 3
+            (0, 255, 0),
+            (255, 0, 0),
+            (0, 0, 255)
         ]
-        
-        # Process roll number bubbles first
-        print(f"  - Processing roll number section...")
-        self.process_roll_number_bubbles(roll_number_bubbles, result_image, roll_number_color, img_width)
-        
-        # Group bubbles into questions and add numbering
+        roll_color = (255, 255, 0)
+        debug_image = corrected_image.copy()
+
         question_number = 1
-        question_tolerance = 15  # pixels tolerance for horizontal alignment
-        
-        # First pass: Learn the grid structure from all questions in each column
-        learned_grids = []
-        for col_idx, col_bubbles in enumerate(question_bubbles_by_column):
-            print(f"  - Learning grid structure for column {col_idx + 1}...")
-            
-            # Group bubbles by Y position to identify questions
-            questions = []
-            current_question_bubbles = []
-            current_y = None
-            
-            for bubble in col_bubbles:
-                bubble_y = bubble['center'][1]
-                
-                if current_y is None or abs(bubble_y - current_y) < question_tolerance:
-                    current_question_bubbles.append(bubble)
-                    if current_y is None:
-                        current_y = bubble_y
-                else:
-                    if current_question_bubbles:
-                        questions.append(current_question_bubbles)
-                    current_question_bubbles = [bubble]
-                    current_y = bubble_y
-            
-            if current_question_bubbles:
-                questions.append(current_question_bubbles)
-            
-            # Analyze X positions from questions - focus on well-formed questions
-            all_x_positions = []
-            for q_bubbles in questions:
-                if 3 <= len(q_bubbles) <= 6:  # Well-formed questions (not too few, not too many)
-                    q_bubbles.sort(key=lambda b: b['center'][0])
-                    # Take only the 4 most evenly spaced bubbles if more than 4
-                    if len(q_bubbles) > 4:
-                        # Select 4 evenly distributed bubbles
-                        step = (len(q_bubbles) - 1) / 3
-                        selected_bubbles = [q_bubbles[int(i * step)] for i in range(4)]
-                        x_positions = [b['center'][0] for b in selected_bubbles]
-                    else:
-                        x_positions = [b['center'][0] for b in q_bubbles]
-                    all_x_positions.extend(x_positions)
-            
-            if len(all_x_positions) >= 8:  # Need enough data points
-                # Simple clustering approach to find 4 consistent grid positions
-                all_x_positions.sort()
-                
-                # Use histogram-based approach to find 4 peaks
-                # Create bins and count occurrences
-                min_x = min(all_x_positions)
-                max_x = max(all_x_positions)
-                bin_width = 10  # 10 pixel bins
-                bins = {}
-                
-                for x in all_x_positions:
-                    bin_key = int(x // bin_width) * bin_width
-                    bins[bin_key] = bins.get(bin_key, 0) + 1
-                
-                # Find the 4 bins with highest counts
-                sorted_bins = sorted(bins.items(), key=lambda x: x[1], reverse=True)
-                top_4_bins = sorted(sorted_bins[:4], key=lambda x: x[0])  # Sort by position
-                
-                if len(top_4_bins) == 4:
-                    # Use bin centers as grid positions
-                    grid_positions = [bin_pos + bin_width/2 for bin_pos, count in top_4_bins]
-                else:
-                    # Fallback: equal spacing
-                    gap = (max_x - min_x) / 3
-                    grid_positions = [min_x + i * gap for i in range(4)]
-                
-                print(f"    Learned grid positions: {[f'{x:.0f}' for x in grid_positions]}")
-                learned_grids.append(grid_positions)
+
+        for column_index in range(3):
+            column_bubbles = [b for b in bubble_candidates if b['column_index'] == column_index]
+            if not column_bubbles:
+                continue
+
+            rows = group_rows(column_bubbles, row_tolerance)
+
+            if column_index == 0:
+                roll_rows = rows[:min(10, len(rows))]
+                question_rows = rows[min(10, len(rows)):]
+
+                for digit_value, row in enumerate(roll_rows):
+                    row_bubbles = sorted(row['bubbles'], key=lambda b: b['center'][0])[:3]
+                    for digit_index, bubble in enumerate(row_bubbles):
+                        filled = bubble['mean_intensity'] < fill_threshold
+                        roll_data['bubbles'].append({
+                            'center': bubble['center'],
+                            'radius': bubble['radius'],
+                            'digit_index': digit_index,
+                            'digit_value': digit_value,
+                            'filled': filled,
+                            'mean_intensity': bubble['mean_intensity']
+                        })
+
+                        draw_color = roll_color if filled else (200, 200, 0)
+                        cv2.circle(debug_image, bubble['center'], int(max(6, bubble['radius'])), draw_color, 2)
+                        if filled:
+                            cv2.circle(debug_image, bubble['center'], 3, draw_color, -1)
+
+                        if filled and roll_data['detected_digits'][digit_index] is None:
+                            roll_data['detected_digits'][digit_index] = digit_value
+
+                rows_to_process = question_rows
             else:
-                # Fallback grid if not enough data
-                learned_grids.append([50 + col_idx * 150 + i * 25 for i in range(4)])
-        
-        # Second pass: Apply learned grid to all questions
-        question_number = 1
-        for col_idx, col_bubbles in enumerate(question_bubbles_by_column):
-            color = column_colors[col_idx]
-            grid_positions = learned_grids[col_idx]
-            
-            # Group bubbles by Y position again
-            current_question_bubbles = []
-            current_y = None
-            
-            def process_question_with_learned_grid(bubbles, y_pos, q_num, grid):
-                """Process question using actual circle detection guided by learned grid"""
-                
-                # Enhanced circle detection that prioritizes actual printed circles
-                actual_circle_positions = []
-                tolerance = 20  # Increased tolerance for better detection
-                
-                # Use bubbles already detected in step 8 for this question row
-                detected_circles = []
-                for bubble in bubbles:
-                    bx, by = bubble['center']
-                    if abs(by - y_pos) < 12:  # Within the question row
-                        detected_circles.append((bx, by))
-                
-                # Remove duplicates
-                unique_circles = []
-                for cx, cy in detected_circles:
-                    is_duplicate = False
-                    for ux, uy in unique_circles:
-                        if abs(cx - ux) < 10 and abs(cy - uy) < 10:
-                            is_duplicate = True
-                            break
-                    if not is_duplicate:
-                        unique_circles.append((cx, cy))
-                
-                print(f"    Q{q_num}: Detected {len(unique_circles)} actual circles")
-                
-                # Enforce exactly 4 bubbles per question (A, B, C, D)
-                if len(unique_circles) != 4:
-                    if len(unique_circles) < 4:
-                        # Too few circles - infer missing positions based on grid
-                        if len(unique_circles) >= 2:
-                            inferred_circles = self.infer_missing_grid_positions(unique_circles, q_num)
-                            if inferred_circles and len(inferred_circles) == 4:
-                                print(f"    Q{q_num}: Inferred {len(inferred_circles) - len(unique_circles)} missing circles from grid")
-                                unique_circles = inferred_circles
-                            else:
-                                # Fallback: create 4 evenly spaced circles based on detected ones
-                                unique_circles = self.create_standard_4_bubble_grid(unique_circles, grid, q_num)
-                        else:
-                            # Too few circles to infer - create standard grid
-                            unique_circles = self.create_standard_4_bubble_grid([], grid, q_num)
-                    else:
-                        # Too many circles - always select exactly the best 4
-                        filtered_circles = self.filter_to_best_grid_circles(unique_circles, q_num)
-                        if filtered_circles and len(filtered_circles) == 4:
-                            print(f"    Q{q_num}: Filtered {len(unique_circles)} circles down to exactly 4 best grid matches")
-                            unique_circles = filtered_circles
-                        else:
-                            # Force to 4 by taking the 4 most evenly distributed
-                            unique_circles.sort(key=lambda c: c[0])  # Sort by X
-                            if len(unique_circles) > 4:
-                                step = (len(unique_circles) - 1) / 3
-                                unique_circles = [unique_circles[int(i * step)] for i in range(4)]
-                                print(f"    Q{q_num}: Forced to 4 evenly distributed circles")
-                
-                # Ensure we always have exactly 4 circles
-                if len(unique_circles) != 4:
-                    print(f"    Q{q_num}: Warning - Still don't have 4 circles, creating standard grid")
-                    unique_circles = self.create_standard_4_bubble_grid(unique_circles, grid, q_num)
-                
-                # Map detected circles to grid positions
-                bubble_to_grid_mapping = {}
-                for cx, cy in unique_circles:
-                    best_grid_idx = None
-                    best_distance = float('inf')
-                    
-                    for i, grid_x in enumerate(grid):
-                        distance = abs(cx - grid_x)
-                        # Use adaptive tolerance - stricter for well-detected grids, looser for sparse ones
-                        adaptive_tolerance = max(tolerance, 25) if len(unique_circles) < 4 else tolerance
-                        if distance < adaptive_tolerance and distance < best_distance:
-                            best_grid_idx = i
-                            best_distance = distance
-                    
-                    if best_grid_idx is not None:
-                        if best_grid_idx not in bubble_to_grid_mapping:
-                            bubble_to_grid_mapping[best_grid_idx] = (cx, cy)
-                        else:
-                            # Check if this circle is closer to the grid position
-                            existing_x, existing_y = bubble_to_grid_mapping[best_grid_idx]
-                            existing_distance = abs(existing_x - grid[best_grid_idx])
-                            if best_distance < existing_distance:
-                                bubble_to_grid_mapping[best_grid_idx] = (cx, cy)
-                
-                # Build actual circle positions from mapping
-                actual_circle_positions = []
-                for grid_idx, (circle_x, circle_y) in bubble_to_grid_mapping.items():
-                    # Check if this is a filled bubble
-                    is_filled = False
-                    matched_bubble = None
-                    for bubble in bubbles:
-                        bx, by = bubble['center']
-                        if abs(circle_x - bx) < 10 and abs(circle_y - by) < 10:
-                            is_filled = True
-                            matched_bubble = bubble
-                            break
-                    
-                    circle_type = 'filled' if is_filled else 'empty'
-                    actual_circle_positions.append((grid_idx, circle_x, circle_type, matched_bubble))
-                
-                print(f"    Q{q_num}: Mapped {len(actual_circle_positions)} circles to grid positions")
-                if len(actual_circle_positions) == 0:
-                    print(f"    Q{q_num}: Warning - No circles mapped to grid! Grid: {[f'{g:.0f}' for g in grid]}, Circles: {[(int(cx), int(cy)) for cx, cy in unique_circles]}, Tolerance: {tolerance:.0f}")
-                
-                # Calculate final positions using actual detected circles
-                if len(actual_circle_positions) >= 2:
-                    actual_circle_positions.sort(key=lambda x: x[0])  # Sort by grid position
-                    
-                    # Use actual detected positions to refine the grid
-                    detected_positions = {}
-                    for grid_idx, actual_x, circle_type, bubble_data in actual_circle_positions:
-                        detected_positions[grid_idx] = actual_x
-                    
-                    # Calculate spacing from detected circles
-                    if len(detected_positions) >= 2:
-                        positions_list = sorted(detected_positions.items())
-                        actual_gap = (positions_list[-1][1] - positions_list[0][1]) / (positions_list[-1][0] - positions_list[0][0])
-                        actual_start = positions_list[0][1] - positions_list[0][0] * actual_gap
-                        
-                        # Generate refined grid using actual spacing
-                        final_positions = [actual_start + i * actual_gap for i in range(4)]
-                        
-                        # Fine-tune positions where we have actual detections
-                        for grid_idx, actual_x in detected_positions.items():
-                            final_positions[grid_idx] = actual_x
-                    else:
-                        # Single detection - use it and estimate others
-                        single_idx, single_x = list(detected_positions.items())[0]
-                        estimated_gap = 20  # Default gap estimate
-                        estimated_start = single_x - single_idx * estimated_gap
-                        final_positions = [estimated_start + i * estimated_gap for i in range(4)]
-                        final_positions[single_idx] = single_x
+                rows_to_process = rows
+
+            for row in rows_to_process:
+                row_bubbles = sorted(row['bubbles'], key=lambda b: b['center'][0])
+                if not row_bubbles:
+                    continue
+
+                choices = []
+                for choice_idx, bubble in enumerate(row_bubbles[:4]):
+                    filled = bubble['mean_intensity'] < fill_threshold
+                    choice_label = chr(ord('A') + choice_idx)
+                    choices.append({
+                        'choice': choice_label,
+                        'center': bubble['center'],
+                        'radius': bubble['radius'],
+                        'filled': filled,
+                        'mean_intensity': bubble['mean_intensity']
+                    })
+
+                    draw_color = column_colors[column_index]
+                    cv2.circle(debug_image, bubble['center'], int(max(6, bubble['radius'])), draw_color, 2)
+                    if filled:
+                        cv2.circle(debug_image, bubble['center'], 3, draw_color, -1)
+
+                if not choices:
+                    continue
+
+                filled_choices = [c['choice'] for c in choices if c['filled']]
+                if filled_choices:
+                    label_text = f"Q{question_number}:" + "/".join(filled_choices)
                 else:
-                    # Fallback to learned grid positions if no circles detected in this row
-                    final_positions = grid
-                
-                # Draw all 4 positions using actual circle positions where available
-                detected_positions_dict = {}
-                for grid_idx, actual_x, circle_type, bubble_data in actual_circle_positions:
-                    detected_positions_dict[grid_idx] = (actual_x, circle_type, bubble_data)
-                
-                # Only draw circles that were actually detected
-                for i in detected_positions_dict:
-                    actual_x, circle_type, bubble_data = detected_positions_dict[i]
-                    actual_center = (int(actual_x), int(y_pos))
-                    
-                    # Use consistent radius for all bubbles (8 pixels)
-                    radius = 8
-                    
-                    if circle_type == 'filled' and bubble_data:
-                        # Draw filled bubble with filled center
-                        cv2.circle(result_image, actual_center, radius, color, 2)
-                        cv2.circle(result_image, actual_center, 3, color, -1)  # Slightly smaller filled center
-                    else:
-                        # Draw empty circle
-                        cv2.circle(result_image, actual_center, radius, color, 2)
-                
-                # Add question number text next to the bubble set
-                if detected_positions_dict:
-                    # Find the leftmost bubble position to place the question number
-                    min_x = min(actual_x for actual_x, _, _ in detected_positions_dict.values())
-                    text_position = (int(min_x - 25), int(y_pos + 5))  # Place text to the left of bubbles
-                    cv2.putText(result_image, f"Q{q_num}", text_position, cv2.FONT_HERSHEY_SIMPLEX, 
-                               0.4, color, 1, cv2.LINE_AA)
-                
-                
-                return q_num + 1
-            
-            for bubble in col_bubbles:
-                bubble_y = bubble['center'][1]
-                
-                # Group bubbles by Y position for question numbering
-                if current_y is None or abs(bubble_y - current_y) < question_tolerance:
-                    current_question_bubbles.append(bubble)
-                    if current_y is None:
-                        current_y = bubble_y
-                else:
-                    # Process the previous question group
-                    question_number = process_question_with_learned_grid(current_question_bubbles, current_y, question_number, grid_positions)
-                    
-                    # Start new group
-                    current_question_bubbles = [bubble]
-                    current_y = bubble_y
-            
-            # Don't forget the last group in this column
-            if current_question_bubbles:
-                question_number = process_question_with_learned_grid(current_question_bubbles, current_y, question_number, grid_positions)
-        
-        
-        # Save step 8 result
+                    label_text = f"Q{question_number}"
+
+                text_position = (int(choices[0]['center'][0] - 30), int(row['y'] + 5))
+                cv2.putText(debug_image, label_text, text_position,
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, column_colors[column_index], 1, cv2.LINE_AA)
+
+                questions.append({
+                    'question_number': question_number,
+                    'column_index': column_index,
+                    'center_y': row['y'],
+                    'choices': choices
+                })
+
+                question_number += 1
+
+        detected_roll = ''.join(str(d) if d is not None else '?' for d in roll_data['detected_digits'])
+        print(f"  - Detected roll digits: {detected_roll}")
+        print(f"  - Total questions detected: {len(questions)}")
+
         step8_path = self.results_dir / "step8_bubble_detection.jpg"
-        cv2.imwrite(str(step8_path), result_image)
+        cv2.imwrite(str(step8_path), debug_image)
         print(f"  - Saved: {step8_path}")
-        
-        return {'roll_numbers': roll_number_bubbles, 'questions': question_bubbles_by_column}, result_image
-    
+
+        return {'roll_numbers': roll_data, 'questions': questions}, debug_image
+
     def step9_draw_section_rectangles(self, corrected_image, bubble_data):
-        """Step 9: Draw rectangles around each section (roll number, question columns)"""
+        """Step 9: Draw rectangles around roll number and question sections"""
         print("Step 9: Drawing section rectangles...")
-        
+
         result_image = corrected_image.copy()
         img_height, img_width = corrected_image.shape[:2]
-        
-        roll_bubbles = bubble_data['roll_numbers']
-        question_bubbles_by_column = bubble_data['questions']
-        
-        # Define section colors
-        roll_color = (255, 255, 0)      # Cyan for roll number section
-        col1_color = (0, 255, 0)        # Green for questions column 1
-        col2_color = (255, 0, 0)        # Blue for questions column 2  
-        col3_color = (0, 0, 255)        # Red for questions column 3
-        
-        # Draw roll number section rectangle and bubbles
+
+        roll_data = bubble_data['roll_numbers']
+        questions = bubble_data['questions']
+
+        roll_color = (255, 255, 0)
+        column_colors = [
+            (0, 255, 0),
+            (255, 0, 0),
+            (0, 0, 255)
+        ]
+        column_names = [
+            "Questions Col 1",
+            "Questions Col 2",
+            "Questions Col 3"
+        ]
+
+        roll_bubbles = roll_data['bubbles']
         if roll_bubbles:
-            roll_x_coords = [b['center'][0] for b in roll_bubbles]
-            roll_y_coords = [b['center'][1] for b in roll_bubbles]
-            
-            # Add margin around roll number bubbles
+            roll_x = [b['center'][0] for b in roll_bubbles]
+            roll_y = [b['center'][1] for b in roll_bubbles]
             margin = 20
-            roll_left = max(0, min(roll_x_coords) - margin)
-            roll_right = min(img_width, max(roll_x_coords) + margin)
-            roll_top = max(0, min(roll_y_coords) - margin)
-            roll_bottom = min(img_height, max(roll_y_coords) + margin)
-            
-            cv2.rectangle(result_image, (roll_left, roll_top), (roll_right, roll_bottom), roll_color, 3)
-            cv2.putText(result_image, "Roll Number", (roll_left, roll_top - 10), 
+            left = max(0, min(roll_x) - margin)
+            right = min(img_width, max(roll_x) + margin)
+            top = max(0, min(roll_y) - margin)
+            bottom = min(img_height, max(roll_y) + margin)
+
+            cv2.rectangle(result_image, (left, top), (right, bottom), roll_color, 3)
+            cv2.putText(result_image, "Roll Number", (left, max(15, top) - 10),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, roll_color, 2)
-            
-            # Draw roll number bubbles with consistent size
+
             for bubble in roll_bubbles:
-                center = bubble['center']
-                radius = 8  # Consistent radius for all bubbles
-                cv2.circle(result_image, center, radius, roll_color, 2)
-            
-            print(f"  - Roll number section: ({roll_left}, {roll_top}) to ({roll_right}, {roll_bottom})")
-        
-        # Draw question column rectangles
-        column_colors = [col1_color, col2_color, col3_color]
-        column_names = ["Questions Col 1", "Questions Col 2", "Questions Col 3"]
-        
-        for col_idx, (col_bubbles, color, name) in enumerate(zip(question_bubbles_by_column, column_colors, column_names)):
-            if col_bubbles:
-                col_x_coords = [b['center'][0] for b in col_bubbles]
-                col_y_coords = [b['center'][1] for b in col_bubbles]
-                
-                # Add margin around question bubbles
-                margin = 25
-                col_left = max(0, min(col_x_coords) - margin)
-                col_right = min(img_width, max(col_x_coords) + margin)
-                col_top = max(0, min(col_y_coords) - margin)
-                col_bottom = min(img_height, max(col_y_coords) + margin)
-                
-                cv2.rectangle(result_image, (col_left, col_top), (col_right, col_bottom), color, 3)
-                cv2.putText(result_image, name, (col_left, col_top - 10), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-                
-                # Draw question bubbles with consistent size
-                for bubble in col_bubbles:
-                    center = bubble['center']
-                    radius = 8  # Consistent radius for all bubbles
-                    cv2.circle(result_image, center, radius, color, 2)
-                
-                print(f"  - {name}: ({col_left}, {col_top}) to ({col_right}, {col_bottom})")
-        
-        # Save step 9 result
+                radius = int(max(6, bubble['radius']))
+                cv2.circle(result_image, bubble['center'], radius, roll_color, 2)
+
+            detected_roll = ''.join(str(d) if d is not None else '?' for d in roll_data['detected_digits'])
+            print(f"  - Roll number bounding box: ({left}, {top}) to ({right}, {bottom})")
+            print(f"  - Detected roll digits: {detected_roll}")
+        else:
+            print("  - No roll number bubbles detected")
+
+        column_points = {0: [], 1: [], 2: []}
+        for question in questions:
+            column_index = question['column_index']
+            for choice in question['choices']:
+                column_points[column_index].append(choice['center'])
+
+        for col_index in range(3):
+            points = column_points[col_index]
+            if not points:
+                print(f"  - {column_names[col_index]}: no bubbles detected")
+                continue
+
+            xs = [p[0] for p in points]
+            ys = [p[1] for p in points]
+            margin = 25
+            left = max(0, min(xs) - margin)
+            right = min(img_width, max(xs) + margin)
+            top = max(0, min(ys) - margin)
+            bottom = min(img_height, max(ys) + margin)
+
+            color = column_colors[col_index]
+            cv2.rectangle(result_image, (left, top), (right, bottom), color, 3)
+            cv2.putText(result_image, column_names[col_index], (left, max(15, top) - 10),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+
+            for question in [q for q in questions if q['column_index'] == col_index]:
+                for choice in question['choices']:
+                    radius = int(max(6, choice['radius']))
+                    cv2.circle(result_image, choice['center'], radius, color, 2)
+
+            print(f"  - {column_names[col_index]}: ({left}, {top}) to ({right}, {bottom})")
+
         step9_path = self.results_dir / "step9_section_rectangles.jpg"
         cv2.imwrite(str(step9_path), result_image)
         print(f"  - Saved: {step9_path}")
-        
-        return result_image
-    
-    def step10_show_filled_bubbles_only(self, corrected_image, bubble_data):
-        """Step 10: Show only filled bubbles with section rectangles"""
-        print("Step 10: Showing only filled bubbles...")
-        
-        result_image = corrected_image.copy()
-        img_height, img_width = corrected_image.shape[:2]
 
-        # Cache grayscale version of corrected image for bubble analysis
+        return result_image
+
+    def step10_show_filled_bubbles_only(self, corrected_image, bubble_data):
+        """Step 10: Highlight only filled bubbles"""
+        print("Step 10: Showing only filled bubbles...")
+
+        result_image = corrected_image.copy()
         if len(corrected_image.shape) == 3:
             gray_corrected = cv2.cvtColor(corrected_image, cv2.COLOR_BGR2GRAY)
         else:
             gray_corrected = corrected_image
 
-        roll_bubbles = bubble_data['roll_numbers']
-        question_bubbles_by_column = bubble_data['questions']
+        img_height, img_width = corrected_image.shape[:2]
 
-        # Define section colors (same as step 9)
-        roll_color = (255, 255, 0)      # Cyan for roll number section
-        col1_color = (0, 255, 0)        # Green for questions column 1
-        col2_color = (255, 0, 0)        # Blue for questions column 2  
-        col3_color = (0, 0, 255)        # Red for questions column 3
-        
-        # Draw roll number section rectangle and only filled bubbles
-        filled_roll_count = 0
-        detected_roll_digits = [None, None, None]  # For 3 digit positions
+        roll_data = bubble_data['roll_numbers']
+        questions = bubble_data['questions']
+
+        roll_color = (255, 255, 0)
+        column_colors = [
+            (0, 255, 0),
+            (255, 0, 0),
+            (0, 0, 255)
+        ]
+
+        roll_bubbles = roll_data['bubbles']
+        filled_roll = 0
         if roll_bubbles:
-            roll_x_coords = [b['center'][0] for b in roll_bubbles]
-            roll_y_coords = [b['center'][1] for b in roll_bubbles]
-            
-            # Add margin around roll number bubbles
+            roll_x = [b['center'][0] for b in roll_bubbles]
+            roll_y = [b['center'][1] for b in roll_bubbles]
             margin = 20
-            roll_left = max(0, min(roll_x_coords) - margin)
-            roll_right = min(img_width, max(roll_x_coords) + margin)
-            roll_top = max(0, min(roll_y_coords) - margin)
-            roll_bottom = min(img_height, max(roll_y_coords) + margin)
-            
-            cv2.rectangle(result_image, (roll_left, roll_top), (roll_right, roll_bottom), roll_color, 3)
-            cv2.putText(result_image, "Roll Number", (roll_left, roll_top - 10), 
+            left = max(0, min(roll_x) - margin)
+            right = min(img_width, max(roll_x) + margin)
+            top = max(0, min(roll_y) - margin)
+            bottom = min(img_height, max(roll_y) + margin)
+
+            cv2.rectangle(result_image, (left, top), (right, bottom), roll_color, 3)
+            cv2.putText(result_image, "Roll Number", (left, max(15, top) - 10),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, roll_color, 2)
-            
-            # Analyze roll number bubbles to extract digits
-            # First, organize bubbles by their digit column and row position
-            roll_bubbles_by_digit = [[], [], []]  # 3 digit columns
-            
-            # Determine digit column positions (based on step 8 logic)
-            roll_bubbles_x = [b['center'][0] for b in roll_bubbles]
-            min_x, max_x = min(roll_bubbles_x), max(roll_bubbles_x)
-            digit_columns = [
-                min_x + (max_x - min_x) * 0.2,   # Hundreds digit
-                min_x + (max_x - min_x) * 0.5,   # Tens digit  
-                min_x + (max_x - min_x) * 0.8    # Units digit
-            ]
-            
-            # Group bubbles by digit column
-            digit_tolerance = 15
+
             for bubble in roll_bubbles:
-                bx = bubble['center'][0]
-                for i, col_x in enumerate(digit_columns):
-                    if abs(bx - col_x) < digit_tolerance:
-                        roll_bubbles_by_digit[i].append(bubble)
-                        break
-            
-            # Process each digit column to find filled bubbles
-            for digit_idx, digit_bubbles in enumerate(roll_bubbles_by_digit):
-                digit_bubbles.sort(key=lambda b: b['center'][1])  # Sort by Y position (top to bottom)
-                
-                for row_idx, bubble in enumerate(digit_bubbles):
-                    center = bubble['center']
-                    area = bubble['area']
+                if bubble['filled']:
+                    radius = int(max(6, bubble['radius']))
+                    cv2.circle(result_image, bubble['center'], radius, roll_color, 2)
+                    cv2.circle(result_image, bubble['center'], 3, roll_color, -1)
+                    filled_roll += 1
 
-                    # Check if this bubble is filled
-                    x, y = center
-                    region_size = 8
-                    x1, y1 = max(0, x - region_size), max(0, y - region_size)
-                    x2, y2 = min(img_width, x + region_size), min(img_height, y + region_size)
+            detected_roll = ''.join(str(d) if d is not None else '?' for d in roll_data['detected_digits'])
+            print(f"  - Roll number section: {filled_roll} filled bubbles")
+            print(f"  - Detected roll number: {detected_roll}")
+        else:
+            print("  - No roll number bubbles detected")
 
-                    bubble_region = gray_corrected[y1:y2, x1:x2]
-                    if bubble_region.size > 0:
-                        mean_intensity = np.mean(bubble_region)
-                        # Filled bubbles are darker (lower intensity)
-                        if mean_intensity < 200:  # Threshold for filled bubbles
-                            radius = 8  # Consistent radius for all bubbles
-                            cv2.circle(result_image, center, radius, roll_color, 2)
-                            cv2.circle(result_image, center, 3, roll_color, -1)  # Filled center
-                            filled_roll_count += 1
-                            
-                            # Record the digit (row_idx corresponds to digit 0-9)
-                            if row_idx < 10:  # Only digits 0-9
-                                detected_roll_digits[digit_idx] = row_idx
-                                
-                                # Add digit label next to filled bubble
-                                digit_names = ["Hundreds", "Tens", "Units"]
-                                label_text = f"{digit_names[digit_idx]}:{row_idx}"
-                                label_x = center[0] + radius + 5
-                                label_y = center[1] + 5
-                                cv2.putText(result_image, label_text, (label_x, label_y), 
-                                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, roll_color, 1)
-            
-            # Construct roll number from detected digits
-            roll_number = ""
-            for digit in detected_roll_digits:
-                if digit is not None:
-                    roll_number += str(digit)
-                else:
-                    roll_number += "?"
-            
-            print(f"  - Roll number section: {filled_roll_count} filled bubbles")
-            print(f"  - Detected roll number: {roll_number}")
-        
-        # Draw question column rectangles and only filled bubbles
-        column_colors = [col1_color, col2_color, col3_color]
-        column_names = ["Questions Col 1", "Questions Col 2", "Questions Col 3"]
-        detected_answers = {}  # Store detected answers by question number
-        
-        # Calculate adaptive fill threshold once for all question bubbles
-        fill_threshold = self.calculate_fill_threshold(corrected_image)
+        filled_answers = {}
+        column_points = {0: [], 1: [], 2: []}
 
-        for col_idx, (col_bubbles, color, name) in enumerate(zip(question_bubbles_by_column, column_colors, column_names)):
-            filled_col_count = 0
-            if col_bubbles:
-                col_x_coords = [b['center'][0] for b in col_bubbles]
-                col_y_coords = [b['center'][1] for b in col_bubbles]
-                
-                # Add margin around question bubbles
-                margin = 25
-                col_left = max(0, min(col_x_coords) - margin)
-                col_right = min(img_width, max(col_x_coords) + margin)
-                col_top = max(0, min(col_y_coords) - margin)
-                col_bottom = min(img_height, max(col_y_coords) + margin)
-                
-                cv2.rectangle(result_image, (col_left, col_top), (col_right, col_bottom), color, 3)
-                cv2.putText(result_image, name, (col_left, col_top - 10), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-                
-                # Organize bubbles by question row (Y position) and choice column (X position)
-                # Group bubbles by Y position (each row is a question)
-                bubbles_by_row = {}
-                question_tolerance = 15  # pixels tolerance for horizontal alignment
-                
-                for bubble in col_bubbles:
-                    center_y = bubble['center'][1]
-                    # Find existing row or create new one
-                    assigned_row = None
-                    for existing_y in bubbles_by_row.keys():
-                        if abs(center_y - existing_y) < question_tolerance:
-                            assigned_row = existing_y
-                            break
-                    
-                    if assigned_row is None:
-                        bubbles_by_row[center_y] = []
-                        assigned_row = center_y
-                    
-                    bubbles_by_row[assigned_row].append(bubble)
-                
-                # Sort rows by Y position (top to bottom)
-                sorted_rows = sorted(bubbles_by_row.items(), key=lambda x: x[0])
-                
-                # Process each question row
-                for row_idx, (row_y, row_bubbles) in enumerate(sorted_rows):
-                    # Sort bubbles in this row by X position (left to right = A, B, C, D)
-                    row_bubbles.sort(key=lambda b: b['center'][0])
-                    
-                    # Calculate question number dynamically based on layout
-                    # Each column continues from where the previous ended
-                    questions_per_column = [len(question_bubbles_by_column[i]) // 4 for i in range(len(question_bubbles_by_column))]
-                    
-                    if col_idx == 0:
-                        question_num = row_idx + 1
-                    elif col_idx == 1:
-                        # Start after all questions from column 0
-                        question_num = questions_per_column[0] + row_idx + 1
-                    elif col_idx == 2:
-                        # Start after all questions from columns 0 and 1
-                        question_num = questions_per_column[0] + questions_per_column[1] + row_idx + 1
-                    else:
-                        # For additional columns, continue the sequence
-                        prev_questions = sum(questions_per_column[:col_idx])
-                        question_num = prev_questions + row_idx + 1
-                    
-                    filled_choices = []
-                    
-                    # Check each bubble in this row for filled status
-                    for choice_idx, bubble in enumerate(row_bubbles):
-                        center = bubble['center']
-                        area = bubble['area']
+        for question in questions:
+            column_index = question['column_index']
+            color = column_colors[column_index]
+            filled_choices = [choice for choice in question['choices'] if choice['filled']]
 
-                        # Check if this bubble is filled
-                        x, y = center
-                        region_size = 8
-                        x1, y1 = max(0, x - region_size), max(0, y - region_size)
-                        x2, y2 = min(img_width, x + region_size), min(img_height, y + region_size)
+            for choice in question['choices']:
+                column_points[column_index].append(choice['center'])
 
-                        bubble_region = gray_corrected[y1:y2, x1:x2]
-                        if bubble_region.size > 0:
-                            mean_intensity = np.mean(bubble_region)
-                            # Filled bubbles are darker (lower intensity)
-                            # Adaptive threshold based on image characteristics
-                            if mean_intensity < fill_threshold:
-                                radius = 8  # Consistent radius for all bubbles
-                                cv2.circle(result_image, center, radius, color, 2)
-                                cv2.circle(result_image, center, 3, color, -1)  # Filled center
-                                filled_col_count += 1
-                                
-                                # Record the choice (A=0, B=1, C=2, D=3)
-                                choice_letter = chr(ord('A') + choice_idx) if choice_idx < 4 else str(choice_idx)
-                                filled_choices.append(choice_letter)
-                                
-                                # Add question number and choice label next to filled bubble
-                                label_text = f"Q{question_num}:{choice_letter}"
-                                label_x = center[0] + radius + 5
-                                label_y = center[1] + 5
-                                cv2.putText(result_image, label_text, (label_x, label_y), 
-                                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
-                    
-                    # Store detected answer for this question
-                    if filled_choices:
-                        detected_answers[question_num] = filled_choices
-                
-                print(f"  - {name}: {filled_col_count} filled bubbles")
-                
-                # Log detected answers for this column  
-                if col_idx == 0:  # Questions Col 1: 1-25
-                    column_questions = [q for q in detected_answers.keys() if 1 <= q <= 25]
-                elif col_idx == 1:  # Questions Col 2: 16-41
-                    column_questions = [q for q in detected_answers.keys() if 16 <= q <= 41] 
-                elif col_idx == 2:  # Questions Col 3: 42-67
-                    column_questions = [q for q in detected_answers.keys() if 42 <= q <= 67]
-                else:
-                    column_questions = []
-                if column_questions:
-                    print(f"  - Detected answers in {name}:")
-                    for q_num in sorted(column_questions):
-                        choices = detected_answers[q_num]
-                        if len(choices) == 1:
-                            print(f"    Question {q_num}: {choices[0]}")
-                        else:
-                            print(f"    Question {q_num}: {', '.join(choices)} (multiple answers)")
-                else:
-                    print(f"  - No answers detected in {name}")
-        
-        # Save step 10 result
+            if filled_choices:
+                filled_answers[question['question_number']] = [c['choice'] for c in filled_choices]
+                for choice in filled_choices:
+                    radius = int(max(6, choice['radius']))
+                    cv2.circle(result_image, choice['center'], radius, color, 2)
+                    cv2.circle(result_image, choice['center'], 3, color, -1)
+                    label = f"Q{question['question_number']}:{choice['choice']}"
+                    text_pos = (choice['center'][0] + radius + 5, choice['center'][1] + 5)
+                    cv2.putText(result_image, label, text_pos,
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+
+        for col_index in range(3):
+            points = column_points[col_index]
+            if not points:
+                continue
+
+            xs = [p[0] for p in points]
+            ys = [p[1] for p in points]
+            margin = 25
+            left = max(0, min(xs) - margin)
+            right = min(img_width, max(xs) + margin)
+            top = max(0, min(ys) - margin)
+            bottom = min(img_height, max(ys) + margin)
+
+            color = column_colors[col_index]
+            cv2.rectangle(result_image, (left, top), (right, bottom), color, 3)
+            cv2.putText(result_image, column_names[col_index], (left, max(15, top) - 10),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+
+        if filled_answers:
+            print("  - Detected answers:")
+            for q_num in sorted(filled_answers.keys()):
+                choices = ', '.join(filled_answers[q_num])
+                print(f"    Question {q_num}: {choices}")
+        else:
+            print("  - No filled answers detected")
+
         step10_path = self.results_dir / "step10_filled_bubbles_only.jpg"
         cv2.imwrite(str(step10_path), result_image)
         print(f"  - Saved: {step10_path}")
-        
+
         return result_image
-    
+
     def process_image_stepwise(self, image_path):
         """Process image through steps 1-10"""
         print(f"Starting stepwise processing of: {image_path}")
@@ -1693,10 +1265,10 @@ class OMRProcessor:
         print("=" * 50)
         print("Processing complete! Check results directory for step images.")
         
-        roll_bubbles = bubble_data['roll_numbers']
-        question_bubbles = bubble_data['questions']
-        total_question_bubbles = sum(len(col) for col in question_bubbles)
-        print(f"Summary: Detected {len(roll_bubbles)} roll number bubbles and {total_question_bubbles} question bubbles")
+        roll_bubble_count = len(bubble_data['roll_numbers']['bubbles'])
+        question_choice_count = sum(len(q['choices']) for q in bubble_data['questions'])
+        question_count = len(bubble_data['questions'])
+        print(f"Summary: Detected {roll_bubble_count} roll number bubbles and {question_choice_count} answer bubbles across {question_count} questions")
         
         return {
             'original': original,
