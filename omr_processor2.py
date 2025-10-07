@@ -101,7 +101,13 @@ def find_anchor_squares(image: np.ndarray) -> np.ndarray:
     closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=2)
 
     contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    min_area = 0.002 * image.shape[0] * image.shape[1]
+
+    # The original area threshold assumed the anchors occupied roughly 0.2% of the
+    # image.  In practice the photographed sheets shrink the anchors significantly,
+    # causing them to be filtered out.  Use a smaller ratio that better matches the
+    # expected anchor footprint so we keep them while still ignoring tiny blobs.
+    image_area = float(image.shape[0] * image.shape[1])
+    min_area = max(1e-4 * image_area, 200.0)
     squares = []
 
     for contour in contours:
